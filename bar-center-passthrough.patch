@@ -1,0 +1,45 @@
+diff --git a/modules/ii/bar/Bar.qml b/modules/ii/bar/Bar.qml
+index 135285f..b30f03c 100644
+--- a/modules/ii/bar/Bar.qml
++++ b/modules/ii/bar/Bar.qml
+@@ -147,11 +147,13 @@ Scope {
+ 
+                     Item {
+                         id: hoverMaskRegion
+-                        anchors {
+-                            fill: barContent
+-                            topMargin: -Config.options.bar.autoHide.hoverRegionWidth
+-                            bottomMargin: -Config.options.bar.autoHide.hoverRegionWidth
+-                        }
++                        // Center-only + "Overlap windows": only the center island is clickable,
++                        // the rest of the bar strip passes clicks through to the window below.
++                        readonly property bool centerOnlyOverlap: barContent.centerOnly && Config.options.bar.centerOnlyReserveFrame
++                        x: centerOnlyOverlap ? barContent.x + barContent.centerMaskLeft : barContent.x
++                        y: barContent.y - Config.options.bar.autoHide.hoverRegionWidth
++                        width: centerOnlyOverlap ? Math.max(0, barContent.centerMaskRight - barContent.centerMaskLeft) : barContent.width
++                        height: barContent.height + Config.options.bar.autoHide.hoverRegionWidth * 2
+                     }
+ 
+                     BarContent {
+diff --git a/modules/ii/bar/BarContent.qml b/modules/ii/bar/BarContent.qml
+index e995486..25dc515 100644
+--- a/modules/ii/bar/BarContent.qml
++++ b/modules/ii/bar/BarContent.qml
+@@ -85,6 +85,17 @@ Item {
+         border.color: Config.options.bar.cornerStyle === 1 && !Config.options.bar.showBackground ? "transparent" : ColorUtils.transparentize(Appearance.colors.colLayer0Border, 0.8) 
+     }
+ 
++    // Horizontal extent (in this item's coordinates) of everything interactive in the center:
++    // pill, its round corners and the dynamic island side widgets. Used by Bar.qml to shrink
++    // the input mask so clicks outside it pass through to windows underneath.
++    readonly property real absCenterX: contentContainer.x + absoluteCenter.x
++    readonly property real centerMaskLeft: Math.min(
++        absCenterX - ((diLeftWidget.active && diLeftWidget.item) ? diLeftWidget.width + diLeftWidget.anchors.rightMargin : 0),
++        centerPillX - (leftPillCorner.visible ? leftPillCorner.implicitSize : 0))
++    readonly property real centerMaskRight: Math.max(
++        absCenterX + absoluteCenter.width + ((diRightWidget.active && diRightWidget.item) ? diRightWidget.width + diRightWidget.anchors.leftMargin : 0),
++        centerPillX + centerPillWidth + (rightPillCorner.visible ? rightPillCorner.implicitSize : 0))
++
+     // center-only
+     readonly property bool centerOnly: root.effectiveLeftLayout.length === 0
+         && root.effectiveRightLayout.length === 0
