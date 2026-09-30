@@ -1,0 +1,597 @@
+diff --git a/modules/common/Config.qml b/modules/common/Config.qml
+index a296c5b..916a763 100644
+--- a/modules/common/Config.qml
++++ b/modules/common/Config.qml
+@@ -695,6 +695,7 @@ Singleton {
+ 
+             property JsonObject overview: JsonObject {
+                 property bool enable: true
++                property bool superPreview: true
+                 property string style: "default"
+                 property real scale: 0.18 // Relative to screen size
+                 property real rows: 2
+diff --git a/modules/common/Persistent.qml b/modules/common/Persistent.qml
+index 2792a0c..7cb1dc1 100644
+--- a/modules/common/Persistent.qml
++++ b/modules/common/Persistent.qml
+@@ -72,6 +72,9 @@ Singleton {
+                     property bool collapsed: false
+                     property int tab: 0
+                 }
++                property JsonObject left: JsonObject {
++                    property int tabIndex: 0
++                }
+             }
+ 
+             property JsonObject booru: JsonObject {
+@@ -83,6 +86,10 @@ Singleton {
+                 property bool inhibit: false
+             }
+ 
++            property JsonObject gamemode: JsonObject {
++                property bool enabled: false
++            }
++
+             property JsonObject record: JsonObject {
+                 property bool enable: false
+             }
+diff --git a/modules/common/models/quickToggles/GameModeToggle.qml b/modules/common/models/quickToggles/GameModeToggle.qml
+index 79dd986..84f3361 100644
+--- a/modules/common/models/quickToggles/GameModeToggle.qml
++++ b/modules/common/models/quickToggles/GameModeToggle.qml
+@@ -1,45 +1,50 @@
+ import QtQuick
+ import Quickshell.Io
++import qs.modules.common
+ import qs.modules.common.models.hyprland
+ import qs.services
+ 
+ QuickToggleModel {
+     id: root
+     name: Translation.tr("Game mode")
+-    toggled: !confOpt.value
++    toggled: Persistent.states.gamemode.enabled
+     icon: "gamepad"
+ 
++    // Animation leaves deliberately left untouched: "layersIn", "layersOut",
++    // "fadeLayersIn", "fadeLayersOut" — these drive layer-shell surfaces like
++    // the sidebars, so leaving them alone keeps sidebar animations working
++    // while Game Mode is on.
++    readonly property var animLeavesToDisable: [
++        "windowsIn", "windowsOut", "windowsMove",
++        "border", "fadeIn", "fadeOut",
++        "workspaces", "specialWorkspaceIn", "specialWorkspaceOut"
++    ]
++
+     mainAction: () => {
+         root.toggled = !root.toggled;
++        Persistent.states.gamemode.enabled = root.toggled;
+         if (root.toggled) {
+             HyprlandConfig.setMany({
+-                "animations:enabled": 0,
+                 "decoration:shadow:enabled": 0,
+                 "decoration:blur:enabled": 0,
+                 "general:gaps_in": 0,
+-                "general:gaps_out": 0,
+                 "general:border_size": 1,
+-                "decoration:rounding": 0,
+                 "general:allow_tearing": 1
+             });
++            let animEntries = {};
++            for (const leaf of root.animLeavesToDisable) animEntries[leaf] = 0;
++            HyprlandConfig.setAnimLeaves(animEntries);
+         } else {
+             HyprlandConfig.resetMany([ //
+-                "animations:enabled", //
+                 "decoration:shadow:enabled", //
+                 "decoration:blur:enabled", //
+                 "general:gaps_in", //
+-                "general:gaps_out", //
+                 "general:border_size", //
+-                "decoration:rounding", //
+                 "general:allow_tearing", //
+             ]);
++            HyprlandConfig.resetAnimLeaves(root.animLeavesToDisable);
+         }
+     }
+ 
+-    HyprlandConfigOption {
+-        id: confOpt
+-        key: "animations:enabled"
+-    }
+-
+     tooltipText: Translation.tr("Game mode")
+ }
+diff --git a/modules/common/widgets/VerticalTabBar.qml b/modules/common/widgets/VerticalTabBar.qml
+index 10f9eab..c161cf1 100644
+--- a/modules/common/widgets/VerticalTabBar.qml
++++ b/modules/common/widgets/VerticalTabBar.qml
+@@ -10,137 +10,101 @@ Item {
+     id: root
+     property alias currentIndex: tabBar.currentIndex
+     required property var tabButtonList
+-    function incrementCurrentIndex() { tabBar.incrementCurrentIndex() }
+-    function decrementCurrentIndex() { tabBar.decrementCurrentIndex() }
+-    function setCurrentIndex(index)  { tabBar.setCurrentIndex(index) }
+-
+-    property real cardHeight: 30
+-    property bool expanded: false
+-
+-    implicitHeight: expanded 
+-        ? tabButtonList.length * (cardHeight + 2)
+-        : cardHeight
+-
+-    Behavior on implicitHeight {
+-        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
++    function incrementCurrentIndex() {
++        if (root.tabButtonList.length === 0) return;
++        tabBar.currentIndex = (tabBar.currentIndex + 1) % root.tabButtonList.length;
+     }
++    function decrementCurrentIndex() {
++        if (root.tabButtonList.length === 0) return;
++        tabBar.currentIndex = (tabBar.currentIndex - 1 + root.tabButtonList.length) % root.tabButtonList.length;
++    }
++    function setCurrentIndex(index) { tabBar.currentIndex = index }
+ 
+-    Repeater {
+-        model: root.tabButtonList
+-        delegate: Rectangle {
+-            required property int index
+-            required property var modelData
+-            property bool isCurrent: index === root.currentIndex
+-            property int totalCount: root.tabButtonList.length
+-
+-            property int visualPosition: {
+-                if (isCurrent) return totalCount - 1
+-                const slots = Array.from({length: totalCount}, (_, i) => i).filter(i => i !== root.currentIndex)
+-                return slots.indexOf(index)
+-            }
+-
+-            visible: isCurrent || root.expanded
+-            width: root.width
+-            height: 30
+-
+-            y: root.expanded 
+-                ? visualPosition * (cardHeight + 2)
+-                : isCurrent ? 0 : 0
+-
+-            z: isCurrent ? 0 : (totalCount - visualPosition)
+-
+-            topLeftRadius: Appearance.rounding.normal
+-            topRightRadius: Appearance.rounding.normal
+-            bottomLeftRadius: isCurrent ? 0 : Appearance.rounding.unsharpenmore
+-            bottomRightRadius: isCurrent ? 0 : Appearance.rounding.unsharpenmore
++    readonly property bool multipleTabs: root.tabButtonList.length > 1
++    readonly property var currentTab: root.tabButtonList[tabBar.currentIndex] ?? null
+ 
+-            color: isCurrent
+-                ? Appearance.colors.colLayer1
+-                : Appearance.colors.colPrimaryContainer
++    property real cardHeight: 30
++    implicitHeight: cardHeight
+ 
+-            opacity: isCurrent ? 1 : (0.3 + ((totalCount - 1 - visualPosition) / Math.max(totalCount - 1, 1)) * 0.3)
++    // Keeps currentIndex bookkeeping without showing any UI of its own
++    TabBar {
++        id: tabBar
++        visible: false
++        height: 0
++        Repeater {
++            model: root.tabButtonList.length
++            delegate: TabButton { background: null }
++        }
++    }
+ 
+-            Behavior on y {
+-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+-            }
+-            Behavior on color {
+-                ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
++    RowLayout {
++        anchors.fill: parent
++        spacing: 4
++
++        RippleButton {
++            id: prevButton
++            visible: root.multipleTabs
++            implicitWidth: root.cardHeight
++            implicitHeight: root.cardHeight
++            buttonRadius: Appearance.rounding.full
++            colBackground: Appearance.colors.colLayer2
++            colBackgroundHover: Appearance.colors.colLayer2Hover
++            colRipple: Appearance.colors.colLayer2Active
++            downAction: () => root.decrementCurrentIndex()
++            contentItem: MaterialSymbol {
++                text: "chevron_left" // "<" button
++                iconSize: Appearance.font.pixelSize.larger
++                horizontalAlignment: Text.AlignHCenter
++                color: Appearance.colors.colOnLayer1
+             }
+-            Behavior on opacity {
+-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
++            StyledToolTip {
++                text: Translation.tr("Previous tab")
+             }
++        }
+ 
+-            Rectangle {
+-                visible: isCurrent
+-                anchors.horizontalCenter: parent.horizontalCenter
+-                anchors.bottom: parent.bottom
+-                anchors.bottomMargin: 12
+-                width: 30
+-                height: 4
+-                radius: height / 2
+-                color: Appearance.colors.colSurfaceContainerHighest
+-                opacity: 0.6
+-            }
++        Rectangle {
++            id: currentTabLabel
++            Layout.fillWidth: true
++            Layout.fillHeight: true
++            radius: Appearance.rounding.normal
++            color: Appearance.colors.colLayer1
+ 
+             RowLayout {
+-                anchors.verticalCenter: parent.verticalCenter
+-                anchors.left: parent.left
+-                anchors.leftMargin: 12
++                anchors.centerIn: parent
+                 spacing: 6
+ 
+                 MaterialSymbol {
+-                    text: parent.parent.modelData.icon
++                    text: root.currentTab?.icon ?? ""
+                     iconSize: Appearance.font.pixelSize.larger
+-                    color: parent.parent.isCurrent
+-                        ? Appearance.colors.colOnLayer1
+-                        : Appearance.colors.colOnPrimaryContainer
+-                    Behavior on color { ColorAnimation { duration: 200 } }
++                    color: Appearance.colors.colOnLayer1
+                 }
+ 
+                 StyledText {
+-                    text: parent.parent.modelData.name
+-                    color: parent.parent.isCurrent
+-                        ? Appearance.colors.colOnLayer1
+-                        : Appearance.colors.colOnPrimaryContainer
+-                    Behavior on color { ColorAnimation { duration: 200 } }
++                    text: root.currentTab?.name ?? ""
++                    color: Appearance.colors.colOnLayer1
+                 }
+             }
++        }
+ 
+-            MouseArea {
+-                anchors.fill: parent
+-                cursorShape: Qt.PointingHandCursor
+-                hoverEnabled: true
+-                onClicked: {
+-                    if (!root.expanded) {
+-                        root.expanded = true
+-                        return
+-                    }
+-                    root.setCurrentIndex(parent.index)
+-                }
++        RippleButton {
++            id: nextButton
++            visible: root.multipleTabs
++            implicitWidth: root.cardHeight
++            implicitHeight: root.cardHeight
++            buttonRadius: Appearance.rounding.full
++            colBackground: Appearance.colors.colLayer2
++            colBackgroundHover: Appearance.colors.colLayer2Hover
++            colRipple: Appearance.colors.colLayer2Active
++            downAction: () => root.incrementCurrentIndex()
++            contentItem: MaterialSymbol {
++                text: "chevron_right" // ">" button
++                iconSize: Appearance.font.pixelSize.larger
++                horizontalAlignment: Text.AlignHCenter
++                color: Appearance.colors.colOnLayer1
+             }
+-
+-            DragHandler {
+-                id: dragHandler
+-                enabled: isCurrent
+-                target: null
+-                onTranslationChanged: {
+-                    if (translation.y < -20) {
+-                        root.expanded = false
+-                    } else if (translation.y > 20) {
+-                        root.expanded = true
+-                    }
+-                }
++            StyledToolTip {
++                text: Translation.tr("Next tab")
+             }
+         }
+     }
+-
+-    TabBar {
+-        id: tabBar
+-        z: -1
+-        background: null
+-        Repeater {
+-            model: root.tabButtonList.length
+-            delegate: TabButton { background: null }
+-        }
+-    }
+-}
+\ No newline at end of file
++}
+diff --git a/modules/ii/overview/Overview.qml b/modules/ii/overview/Overview.qml
+index 3e8f34c..f74fa79 100644
+--- a/modules/ii/overview/Overview.qml
++++ b/modules/ii/overview/Overview.qml
+@@ -55,7 +55,13 @@ Scope {
+                     GlobalFocusGrab.dismiss();
+                 } else {
+                     if (!overviewScope.dontAutoCancelSearch) {
+-                        searchWidget.cancelSearch();
++                        if (Config.options.overview.superPreview) {
++                            searchWidget.cancelSearch();
++                        } else {
++                            // Super Preview disabled: skip the workspace/window
++                            // preview grid and jump straight into the apps list.
++                            panelWindow.setSearchingText(Config.options.search.prefix.app);
++                        }
+                     }
+                     GlobalFocusGrab.addDismissable(panelWindow);
+                 }
+diff --git a/modules/ii/settings/pages/InterfaceConfig.qml b/modules/ii/settings/pages/InterfaceConfig.qml
+index 728c59c..4c5eba5 100644
+--- a/modules/ii/settings/pages/InterfaceConfig.qml
++++ b/modules/ii/settings/pages/InterfaceConfig.qml
+@@ -523,6 +523,14 @@ ContentPage {
+                         Config.options.overview.enable = checked;
+                     }
+                 }
++                ConfigSwitch {
++                    buttonIcon: "preview"
++                    text: Translation.tr("Super Preview")
++                    checked: Config.options.overview.superPreview
++                    onCheckedChanged: {
++                        Config.options.overview.superPreview = checked;
++                    }
++                }
+                 ConfigSwitch {
+                     buttonIcon: "center_focus_strong"
+                     text: Translation.tr("Center icons")
+diff --git a/modules/ii/sidebarLeft/SidebarLeftContent.qml b/modules/ii/sidebarLeft/SidebarLeftContent.qml
+index a506d0f..6f3c6d0 100644
+--- a/modules/ii/sidebarLeft/SidebarLeftContent.qml
++++ b/modules/ii/sidebarLeft/SidebarLeftContent.qml
+@@ -24,6 +24,12 @@ Item {
+         ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
+     ]
+     property int tabCount: swipeView.count
++    // Restore the last tab that was open, clamped in case the tab list
++    // shrunk (e.g. a tab got disabled) since it was last saved.
++    property int initialTabIndex: Math.min(
++        Math.max(Persistent.states.sidebar.left.tabIndex, 0),
++        Math.max(root.tabButtonList.length - 1, 0)
++    )
+ 
+     function focusActiveItem() {
+         swipeView.currentItem.forceActiveFocus()
+@@ -47,15 +53,18 @@ Item {
+             fill: parent
+             margins: sidebarPadding
+         }
+-        spacing: verticalTabBar.expanded ? -2 : 0
++        spacing: 0
+ 
+         VerticalTabBar {
+             id: verticalTabBar
+             visible: tabButtonList.length > 0
+             Layout.fillWidth: true
+             tabButtonList: root.tabButtonList
+-            currentIndex: swipeView.currentIndex
+-            onCurrentIndexChanged: swipeView.currentIndex = currentIndex
++            currentIndex: root.initialTabIndex
++            onCurrentIndexChanged: {
++                swipeView.currentIndex = currentIndex;
++                Persistent.states.sidebar.left.tabIndex = currentIndex;
++            }
+         }
+ 
+         Rectangle {
+@@ -73,7 +82,7 @@ Item {
+                 id: swipeView
+                 anchors.fill: parent
+                 spacing: 10
+-                currentIndex: tabBar.currentIndex
++                currentIndex: root.initialTabIndex
+ 
+                 clip: true
+                 layer.enabled: true
+diff --git a/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml b/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
+index a64c336..9d638f1 100644
+--- a/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
++++ b/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
+@@ -7,25 +7,31 @@ import Quickshell.Io
+ QuickToggleButton {
+     id: root
+     buttonIcon: "gamepad"
+-    toggled: toggled
++    toggled: Persistent.states.gamemode.enabled
++
++    // Animation leaves deliberately left untouched: "layersIn", "layersOut",
++    // "fadeLayersIn", "fadeLayersOut" — these drive layer-shell surfaces like
++    // the sidebars, so leaving them alone keeps sidebar animations working
++    // while Game Mode is on.
++    readonly property var animLeavesToDisable: [
++        "windowsIn", "windowsOut", "windowsMove",
++        "border", "fadeIn", "fadeOut",
++        "workspaces", "specialWorkspaceIn", "specialWorkspaceOut"
++    ]
+ 
+     onClicked: {
+         root.toggled = !root.toggled
++        Persistent.states.gamemode.enabled = root.toggled
+         if (root.toggled) {
+-            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 0; keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:gaps_out 0; keyword general:border_size 1; keyword decoration:rounding 0; keyword general:allow_tearing 1"`])
++            const animCmds = root.animLeavesToDisable.map(leaf => `keyword animation ${leaf},0`).join("; ")
++            Quickshell.execDetached(["bash", "-c",
++                `hyprctl --batch "keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:border_size 1; keyword general:allow_tearing 1; ${animCmds}"`
++            ])
+         } else {
+             Quickshell.execDetached(["hyprctl", "reload"])
+         }
+     }
+-    Process {
+-        id: fetchActiveState
+-        running: true
+-        command: ["bash", "-c", `test "$(hyprctl getoption animations:enabled -j | jq ".int")" -ne 0`]
+-        onExited: (exitCode, exitStatus) => {
+-            root.toggled = exitCode !== 0 // Inverted because enabled = nonzero exit
+-        }
+-    }
+     StyledToolTip {
+         text: Translation.tr("Game mode")
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/scripts/hyprland/hyprconfigurator.py b/scripts/hyprland/hyprconfigurator.py
+index 785e256..8edcf12 100755
+--- a/scripts/hyprland/hyprconfigurator.py
++++ b/scripts/hyprland/hyprconfigurator.py
+@@ -157,6 +157,53 @@ def edit_lua(file_path, set_pairs, reset_keys):
+     write_atomic(file_path, "".join(new_lines))
+ 
+ 
++def to_lua_animation_line(leaf, enabled):
++    val = "false" if str(enabled) in ("0", "false", "False") else "true"
++    return f'hl.animation({{ leaf = "{leaf}", enabled = {val} }})\n'
++
++
++def make_animation_marker(leaf):
++    return f'leaf = "{leaf}"'
++
++
++def edit_lua_animations(file_path, set_pairs, reset_leaves):
++    try:
++        with open(file_path) as f:
++            lines = f.readlines()
++    except FileNotFoundError:
++        lines = []
++
++    set_dict    = dict(set_pairs)
++    reset_set   = set(reset_leaves)
++    all_leaves  = list(set_dict) + list(reset_set)
++    markers     = {leaf: make_animation_marker(leaf) for leaf in all_leaves}
++
++    new_lines  = []
++    found_leaves = set()
++
++    for line in lines:
++        matched = None
++        for leaf in all_leaves:
++            if markers[leaf] in line:
++                matched = leaf
++                break
++        if matched is None:
++            new_lines.append(line)
++        elif matched in reset_set:
++            print(f"Removed animation override: {matched}")
++        else:
++            new_lines.append(to_lua_animation_line(matched, set_dict[matched]))
++            found_leaves.add(matched)
++            print(f"Updated animation: {to_lua_animation_line(matched, set_dict[matched]).strip()}")
++
++    for leaf, enabled in set_dict.items():
++        if leaf not in found_leaves:
++            new_lines.append(to_lua_animation_line(leaf, enabled))
++            print(f"Added animation:   {to_lua_animation_line(leaf, enabled).strip()}")
++
++    write_atomic(file_path, "".join(new_lines))
++
++
+ def save_preset(anim_file, preset_name):
+     content = ANIM_PRESETS.get(preset_name)
+     if not content:
+@@ -171,6 +218,8 @@ if __name__ == "__main__":
+     p.add_argument("--file", default="~/.config/hypr/hyprland/shellOverrides/main.lua")
+     p.add_argument("--set", nargs=2, action="append", metavar=("KEY", "VALUE"))
+     p.add_argument("--reset", action="append", metavar="KEY")
++    p.add_argument("--set-anim", nargs=2, action="append", metavar=("LEAF", "ENABLED"))
++    p.add_argument("--reset-anim", action="append", metavar="LEAF")
+     p.add_argument("--anim-preset", metavar="PRESET")
+     p.add_argument("--anim-file", default="~/.config/hypr/hyprland/shellOverrides/animations.lua")
+     args = p.parse_args()
+@@ -189,5 +238,18 @@ if __name__ == "__main__":
+ 
+     if set_pairs or reset_keys:
+         edit_lua(os.path.expanduser(args.file), set_pairs, reset_keys)
+-    elif not args.anim_preset:
+-        print("Error: specify --set, --reset, or --anim-preset")
+\ No newline at end of file
++
++    raw_anim_sets   = args.set_anim or []
++    reset_anim_leaves = args.reset_anim or []
++    anim_set_pairs  = []
++    for leaf, v in raw_anim_sets:
++        if v == "[[EMPTY]]":
++            reset_anim_leaves.append(leaf)
++        else:
++            anim_set_pairs.append((leaf, v))
++
++    if anim_set_pairs or reset_anim_leaves:
++        edit_lua_animations(os.path.expanduser(args.file), anim_set_pairs, reset_anim_leaves)
++
++    if not (set_pairs or reset_keys or anim_set_pairs or reset_anim_leaves or args.anim_preset):
++        print("Error: specify --set, --reset, --set-anim, --reset-anim, or --anim-preset")
+\ No newline at end of file
+diff --git a/services/HyprlandConfig.qml b/services/HyprlandConfig.qml
+index 13013b4..5e02eb9 100644
+--- a/services/HyprlandConfig.qml
++++ b/services/HyprlandConfig.qml
+@@ -60,6 +60,26 @@ Singleton {
+         Quickshell.execDetached(args)
+     }
+ 
++    // Enable/disable individual animation leaves (e.g. "windowsIn", "border",
++    // "layersIn") instead of the global animations:enabled master switch, so
++    // some categories (like layer-shell surfaces such as sidebars) can be
++    // left animated while others are turned off.
++    function setAnimLeaves(entries: var) {
++        let args = ["python3", root.configuratorScriptPath, "--file", root.shellOverridesPath]
++        for (let leaf in entries) {
++            args.push("--set-anim", leaf, String(entries[leaf]))
++        }
++        Quickshell.execDetached(args)
++    }
++
++    function resetAnimLeaves(leaves: list<string>) {
++        let args = ["python3", root.configuratorScriptPath, "--file", root.shellOverridesPath]
++        for (let i = 0; i < leaves.length; i++) {
++            args.push("--reset-anim", leaves[i])
++        }
++        Quickshell.execDetached(args)
++    }
++
+     readonly property string borderActiveKey: "general:col:active_border"
+     readonly property string borderInactiveKey: "general:col:inactive_border"
+ 
+diff --git a/translations/en_US.json b/translations/en_US.json
+index dd3be71..48c83e4 100644
+--- a/translations/en_US.json
++++ b/translations/en_US.json
+@@ -309,6 +309,8 @@
+   "Welcome app": "Welcome app",
+   "Humidity": "Humidity",
+   "Page %1": "Page %1",
++  "Previous tab": "Previous tab",
++  "Next tab": "Next tab",
+   "Feels like %1": "Feels like %1",
+   "Transparency": "Transparency",
+   "%1   •   %2 tasks": "%1   •   %2 tasks",
+@@ -634,6 +636,7 @@
+   "Similar images": "Similar images",
+   "Sort option is set to %1": "Sort option is set to %1",
+   "Sort results. Usage: %1sort SORT_OPTION": "Sort results. Usage: %1sort SORT_OPTION",
++  "Super Preview": "Super Preview",
+   "Swap": "Swap",
+   "Symbol": "Symbol",
+   "System Age  •": "System Age  •",
