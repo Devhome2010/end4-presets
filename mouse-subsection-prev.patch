@@ -1,0 +1,157 @@
+diff --git a/modules/common/Config.qml b/modules/common/Config.qml
+index 2068aa1..46d49fb 100644
+--- a/modules/common/Config.qml
++++ b/modules/common/Config.qml
+@@ -209,6 +209,14 @@ Singleton {
+                     property int repeatDelay: 250
+                     property int repeatRate: 35
+                     property int followMouse: 1
++                    property JsonObject mouse: JsonObject {
++                        property real sensitivity: 0
++                        property string accelProfile: "adaptive"
++                        property bool forceNoAccel: false
++                        property bool leftHanded: false
++                        property bool naturalScroll: false
++                        property real scrollFactor: 1.0
++                    }
+                     property JsonObject touchpad: JsonObject {
+                         property bool naturalScroll: false
+                         property bool disableWhileTyping: true
+diff --git a/modules/ii/settings/pages/HyprlandConfig.qml b/modules/ii/settings/pages/HyprlandConfig.qml
+index 0b19250..99e61d3 100644
+--- a/modules/ii/settings/pages/HyprlandConfig.qml
++++ b/modules/ii/settings/pages/HyprlandConfig.qml
+@@ -57,6 +57,12 @@ ContentPage {
+             "input:repeat_delay":                   h.input.repeatDelay,
+             "input:repeat_rate":                    h.input.repeatRate,
+             "input:follow_mouse":                   h.input.followMouse,
++            "input:sensitivity":                    h.input.mouse.sensitivity,
++            "input:accel_profile":                  h.input.mouse.accelProfile,
++            "input:force_no_accel":                 h.input.mouse.forceNoAccel ? 1 : 0,
++            "input:left_handed":                    h.input.mouse.leftHanded ? 1 : 0,
++            "input:natural_scroll":                 h.input.mouse.naturalScroll ? 1 : 0,
++            "input:scroll_factor":                  h.input.mouse.scrollFactor,
+             "input:touchpad:natural_scroll":        h.input.touchpad.naturalScroll ? 1 : 0,
+             "input:touchpad:disable_while_typing":  h.input.touchpad.disableWhileTyping ? 1 : 0,
+             "input:touchpad:clickfinger_behavior":  h.input.touchpad.clickfingerBehavior ? 1 : 0,
+@@ -460,6 +466,85 @@ ContentPage {
+                 }
+             }
+ 
++            ContentSubsection {
++                title: Translation.tr("Mouse")
++
++                GroupedList {
++                    ConfigSpinBox {
++                        icon: "mouse"
++                        text: Translation.tr("Sensitivity")
++                        value: Math.round(Config.options.hyprland.input.mouse.sensitivity * 100)
++                        from: -100; to: 100; stepSize: 5
++                        onValueChanged: {
++                            const newVal = value / 100.0
++                            if (newVal === Config.options.hyprland.input.mouse.sensitivity) return
++                            Config.options.hyprland.input.mouse.sensitivity = newVal
++                            HyprlandConfig.set("input:sensitivity", newVal)
++                        }
++                    }
++
++                    ConfigSelectionArray {
++                        text: Translation.tr("Acceleration profile")
++                        icon: "show_chart"
++                        currentValue: Config.options.hyprland.input.mouse.accelProfile
++                        onSelected: newValue => {
++                            Config.options.hyprland.input.mouse.accelProfile = newValue
++                            HyprlandConfig.set("input:accel_profile", newValue)
++                        }
++                        options: [
++                            { displayName: Translation.tr("Adaptive"), icon: "trending_up",   value: "adaptive" },
++                            { displayName: Translation.tr("Flat"),     icon: "horizontal_rule", value: "flat"    },
++                        ]
++                    }
++
++                    ConfigSwitch {
++                        buttonIcon: "speed"
++                        text: Translation.tr("Disable acceleration")
++                        checked: Config.options.hyprland.input.mouse.forceNoAccel
++                        onCheckedChanged: {
++                            if (checked === Config.options.hyprland.input.mouse.forceNoAccel) return
++                            Config.options.hyprland.input.mouse.forceNoAccel = checked
++                            HyprlandConfig.set("input:force_no_accel", checked ? 1 : 0)
++                        }
++                    }
++
++                    ConfigSwitch {
++                        buttonIcon: "back_hand"
++                        text: Translation.tr("Left-handed mode")
++                        checked: Config.options.hyprland.input.mouse.leftHanded
++                        onCheckedChanged: {
++                            if (checked === Config.options.hyprland.input.mouse.leftHanded) return
++                            Config.options.hyprland.input.mouse.leftHanded = checked
++                            HyprlandConfig.set("input:left_handed", checked ? 1 : 0)
++                        }
++                    }
++
++                    ConfigSwitch {
++                        buttonIcon: "swap_vert"
++                        text: Translation.tr("Mouse natural scroll")
++                        checked: Config.options.hyprland.input.mouse.naturalScroll
++                        onCheckedChanged: {
++                            if (checked === Config.options.hyprland.input.mouse.naturalScroll) return
++                            Config.options.hyprland.input.mouse.naturalScroll = checked
++                            HyprlandConfig.set("input:natural_scroll", checked ? 1 : 0)
++                        }
++                    }
++
++                    ConfigSpinBox {
++                        icon: "swipe_vertical"
++                        text: Translation.tr("Mouse scroll factor")
++                        value: Math.round(Config.options.hyprland.input.mouse.scrollFactor * 10)
++                        from: 1; to: 30; stepSize: 1
++                        onValueChanged: {
++                            const newVal = value / 10.0
++                            if (newVal === Config.options.hyprland.input.mouse.scrollFactor) return
++                            Config.options.hyprland.input.mouse.scrollFactor = newVal
++                            HyprlandConfig.set("input:scroll_factor", newVal)
++                        }
++                    }
++                }
++            }
++
+             ContentSubsection {
+                 title: Translation.tr("Touchpad")
+                 GroupedList {
+diff --git a/scripts/hyprland/hyprconfigurator.py b/scripts/hyprland/hyprconfigurator.py
+index deeec79..2fc7be5 100755
+--- a/scripts/hyprland/hyprconfigurator.py
++++ b/scripts/hyprland/hyprconfigurator.py
+@@ -9,6 +9,9 @@ BOOL_KEYS = {
+     "decoration:shadow:enabled",
+     "animations:enabled",
+     "input:numlock_by_default",
++    "input:force_no_accel",
++    "input:left_handed",
++    "input:natural_scroll",
+     "input:touchpad:natural_scroll",
+     "input:touchpad:disable_while_typing",
+     "input:touchpad:clickfinger_behavior",
+diff --git a/translations/en_US.json b/translations/en_US.json
+index dd3be71..7d17304 100644
+--- a/translations/en_US.json
++++ b/translations/en_US.json
+@@ -748,5 +748,14 @@
+   "Left Sidebar": "Left Sidebar",
+   "Write something here...\nUse '-' to create copyable bullet points, like this:\n\nSheep fricker\n- 4x Slab\n- 1x Boat\n- 4x Redstone Dust\n- 1x Sticky Piston\n- 1x End Rod\n- 4x Redstone Repeater\n- 1x Redstone Torch\n- 1x Sheep": "Write something here...\nUse '-' to create copyable bullet points, like this:\n\nSheep fricker\n- 4x Slab\n- 1x Boat\n- 4x Redstone Dust\n- 1x Sticky Piston\n- 1x End Rod\n- 4x Redstone Repeater\n- 1x Redstone Torch\n- 1x Sheep",
+   "Keyboard": "Keyboard",
+-  "Gaps In": "Gaps In"
++  "Gaps In": "Gaps In",
++  "Mouse": "Mouse",
++  "Sensitivity": "Sensitivity",
++  "Acceleration profile": "Acceleration profile",
++  "Adaptive": "Adaptive",
++  "Flat": "Flat",
++  "Disable acceleration": "Disable acceleration",
++  "Left-handed mode": "Left-handed mode",
++  "Mouse natural scroll": "Mouse natural scroll",
++  "Mouse scroll factor": "Mouse scroll factor"
+ }
+\ No newline at end of file
