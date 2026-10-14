@@ -1,0 +1,2282 @@
+diff --git a/GlobalStates.qml b/GlobalStates.qml
+index bc5fed6..2262967 100644
+--- a/GlobalStates.qml
++++ b/GlobalStates.qml
+@@ -14,6 +14,7 @@ Singleton {
+     property bool barStyleEditorOpen: false
+     property bool crosshairOpen: false
+     property bool equalizerOpen: false
++    property bool trayPanelOpen: false
+     property bool sidebarLeftOpen: false
+     property bool sidebarRightOpen: false
+     property bool mediaControlsOpen: false
+@@ -109,7 +110,8 @@ Singleton {
+         { displayName: Translation.tr("Screen Translator"),      value: "screenTranslatorOpen" },
+         { displayName: Translation.tr("On-screen Keyboard"),     value: "oskOpen" },
+         { displayName: Translation.tr("Session Menu"),           value: "sessionOpen" },
+-        { displayName: Translation.tr("Equalizer"),           value: "equalizerOpen" }
++        { displayName: Translation.tr("Equalizer"),           value: "equalizerOpen" },
++        { displayName: Translation.tr("Tray Panel"),          value: "trayPanelOpen" }
+     ]
+ 
+     function toggleState(name) {
+diff --git a/modules/common/Config.qml b/modules/common/Config.qml
+index 928f64c..15125d2 100644
+--- a/modules/common/Config.qml
++++ b/modules/common/Config.qml
+@@ -766,6 +766,7 @@ Singleton {
+ 
+             property JsonObject overview: JsonObject {
+                 property bool enable: true
++                property bool superPreview: true
+                 property string style: "default"
+                 property real scale: 0.18 // Relative to screen size
+                 property real rows: 2
+@@ -810,6 +811,16 @@ Singleton {
+                 property bool filterPassive: true
+             }
+ 
++            property JsonObject trayPanel: JsonObject {
++                property int columns: 3
++                property int tileSize: 96
++                property int cornerRadius: 28
++                property bool showLabels: true
++                property bool hideInactive: false
++                property bool animate: true
++                property string placement: "bar" // bar | topLeft | topRight | bottomLeft | bottomRight | center
++            }
++
+             property JsonObject musicRecognition: JsonObject {
+                 property int timeout: 16
+                 property int interval: 4
+diff --git a/modules/common/Persistent.qml b/modules/common/Persistent.qml
+index 2792a0c..7cb1dc1 100644
+--- a/modules/common/Persistent.qml
++++ b/modules/common/Persistent.qml
+@@ -72,6 +72,9 @@ Singleton {
+                     property bool collapsed: false
+                     property int tab: 0
+                 }
++                property JsonObject left: JsonObject {
++                    property int tabIndex: 0
++                }
+             }
+ 
+             property JsonObject booru: JsonObject {
+@@ -83,6 +86,10 @@ Singleton {
+                 property bool inhibit: false
+             }
+ 
++            property JsonObject gamemode: JsonObject {
++                property bool enabled: false
++            }
++
+             property JsonObject record: JsonObject {
+                 property bool enable: false
+             }
+diff --git a/modules/common/models/quickToggles/GameModeToggle.qml b/modules/common/models/quickToggles/GameModeToggle.qml
+index 79dd986..84f3361 100644
+--- a/modules/common/models/quickToggles/GameModeToggle.qml
++++ b/modules/common/models/quickToggles/GameModeToggle.qml
+@@ -1,45 +1,50 @@
+ import QtQuick
+ import Quickshell.Io
++import qs.modules.common
+ import qs.modules.common.models.hyprland
+ import qs.services
+ 
+ QuickToggleModel {
+     id: root
+     name: Translation.tr("Game mode")
+-    toggled: !confOpt.value
++    toggled: Persistent.states.gamemode.enabled
+     icon: "gamepad"
+ 
++    // Animation leaves deliberately left untouched: "layersIn", "layersOut",
++    // "fadeLayersIn", "fadeLayersOut" — these drive layer-shell surfaces like
++    // the sidebars, so leaving them alone keeps sidebar animations working
++    // while Game Mode is on.
++    readonly property var animLeavesToDisable: [
++        "windowsIn", "windowsOut", "windowsMove",
++        "border", "fadeIn", "fadeOut",
++        "workspaces", "specialWorkspaceIn", "specialWorkspaceOut"
++    ]
++
+     mainAction: () => {
+         root.toggled = !root.toggled;
++        Persistent.states.gamemode.enabled = root.toggled;
+         if (root.toggled) {
+             HyprlandConfig.setMany({
+-                "animations:enabled": 0,
+                 "decoration:shadow:enabled": 0,
+                 "decoration:blur:enabled": 0,
+                 "general:gaps_in": 0,
+-                "general:gaps_out": 0,
+                 "general:border_size": 1,
+-                "decoration:rounding": 0,
+                 "general:allow_tearing": 1
+             });
++            let animEntries = {};
++            for (const leaf of root.animLeavesToDisable) animEntries[leaf] = 0;
++            HyprlandConfig.setAnimLeaves(animEntries);
+         } else {
+             HyprlandConfig.resetMany([ //
+-                "animations:enabled", //
+                 "decoration:shadow:enabled", //
+                 "decoration:blur:enabled", //
+                 "general:gaps_in", //
+-                "general:gaps_out", //
+                 "general:border_size", //
+-                "decoration:rounding", //
+                 "general:allow_tearing", //
+             ]);
++            HyprlandConfig.resetAnimLeaves(root.animLeavesToDisable);
+         }
+     }
+ 
+-    HyprlandConfigOption {
+-        id: confOpt
+-        key: "animations:enabled"
+-    }
+-
+     tooltipText: Translation.tr("Game mode")
+ }
+diff --git a/modules/common/widgets/VerticalTabBar.qml b/modules/common/widgets/VerticalTabBar.qml
+index 10f9eab..c161cf1 100644
+--- a/modules/common/widgets/VerticalTabBar.qml
++++ b/modules/common/widgets/VerticalTabBar.qml
+@@ -10,137 +10,101 @@ Item {
+     id: root
+     property alias currentIndex: tabBar.currentIndex
+     required property var tabButtonList
+-    function incrementCurrentIndex() { tabBar.incrementCurrentIndex() }
+-    function decrementCurrentIndex() { tabBar.decrementCurrentIndex() }
+-    function setCurrentIndex(index)  { tabBar.setCurrentIndex(index) }
+-
+-    property real cardHeight: 30
+-    property bool expanded: false
+-
+-    implicitHeight: expanded 
+-        ? tabButtonList.length * (cardHeight + 2)
+-        : cardHeight
+-
+-    Behavior on implicitHeight {
+-        NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
++    function incrementCurrentIndex() {
++        if (root.tabButtonList.length === 0) return;
++        tabBar.currentIndex = (tabBar.currentIndex + 1) % root.tabButtonList.length;
+     }
++    function decrementCurrentIndex() {
++        if (root.tabButtonList.length === 0) return;
++        tabBar.currentIndex = (tabBar.currentIndex - 1 + root.tabButtonList.length) % root.tabButtonList.length;
++    }
++    function setCurrentIndex(index) { tabBar.currentIndex = index }
+ 
+-    Repeater {
+-        model: root.tabButtonList
+-        delegate: Rectangle {
+-            required property int index
+-            required property var modelData
+-            property bool isCurrent: index === root.currentIndex
+-            property int totalCount: root.tabButtonList.length
+-
+-            property int visualPosition: {
+-                if (isCurrent) return totalCount - 1
+-                const slots = Array.from({length: totalCount}, (_, i) => i).filter(i => i !== root.currentIndex)
+-                return slots.indexOf(index)
+-            }
+-
+-            visible: isCurrent || root.expanded
+-            width: root.width
+-            height: 30
+-
+-            y: root.expanded 
+-                ? visualPosition * (cardHeight + 2)
+-                : isCurrent ? 0 : 0
+-
+-            z: isCurrent ? 0 : (totalCount - visualPosition)
+-
+-            topLeftRadius: Appearance.rounding.normal
+-            topRightRadius: Appearance.rounding.normal
+-            bottomLeftRadius: isCurrent ? 0 : Appearance.rounding.unsharpenmore
+-            bottomRightRadius: isCurrent ? 0 : Appearance.rounding.unsharpenmore
++    readonly property bool multipleTabs: root.tabButtonList.length > 1
++    readonly property var currentTab: root.tabButtonList[tabBar.currentIndex] ?? null
+ 
+-            color: isCurrent
+-                ? Appearance.colors.colLayer1
+-                : Appearance.colors.colPrimaryContainer
++    property real cardHeight: 30
++    implicitHeight: cardHeight
+ 
+-            opacity: isCurrent ? 1 : (0.3 + ((totalCount - 1 - visualPosition) / Math.max(totalCount - 1, 1)) * 0.3)
++    // Keeps currentIndex bookkeeping without showing any UI of its own
++    TabBar {
++        id: tabBar
++        visible: false
++        height: 0
++        Repeater {
++            model: root.tabButtonList.length
++            delegate: TabButton { background: null }
++        }
++    }
+ 
+-            Behavior on y {
+-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+-            }
+-            Behavior on color {
+-                ColorAnimation { duration: 200; easing.type: Easing.OutCubic }
++    RowLayout {
++        anchors.fill: parent
++        spacing: 4
++
++        RippleButton {
++            id: prevButton
++            visible: root.multipleTabs
++            implicitWidth: root.cardHeight
++            implicitHeight: root.cardHeight
++            buttonRadius: Appearance.rounding.full
++            colBackground: Appearance.colors.colLayer2
++            colBackgroundHover: Appearance.colors.colLayer2Hover
++            colRipple: Appearance.colors.colLayer2Active
++            downAction: () => root.decrementCurrentIndex()
++            contentItem: MaterialSymbol {
++                text: "chevron_left" // "<" button
++                iconSize: Appearance.font.pixelSize.larger
++                horizontalAlignment: Text.AlignHCenter
++                color: Appearance.colors.colOnLayer1
+             }
+-            Behavior on opacity {
+-                NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
++            StyledToolTip {
++                text: Translation.tr("Previous tab")
+             }
++        }
+ 
+-            Rectangle {
+-                visible: isCurrent
+-                anchors.horizontalCenter: parent.horizontalCenter
+-                anchors.bottom: parent.bottom
+-                anchors.bottomMargin: 12
+-                width: 30
+-                height: 4
+-                radius: height / 2
+-                color: Appearance.colors.colSurfaceContainerHighest
+-                opacity: 0.6
+-            }
++        Rectangle {
++            id: currentTabLabel
++            Layout.fillWidth: true
++            Layout.fillHeight: true
++            radius: Appearance.rounding.normal
++            color: Appearance.colors.colLayer1
+ 
+             RowLayout {
+-                anchors.verticalCenter: parent.verticalCenter
+-                anchors.left: parent.left
+-                anchors.leftMargin: 12
++                anchors.centerIn: parent
+                 spacing: 6
+ 
+                 MaterialSymbol {
+-                    text: parent.parent.modelData.icon
++                    text: root.currentTab?.icon ?? ""
+                     iconSize: Appearance.font.pixelSize.larger
+-                    color: parent.parent.isCurrent
+-                        ? Appearance.colors.colOnLayer1
+-                        : Appearance.colors.colOnPrimaryContainer
+-                    Behavior on color { ColorAnimation { duration: 200 } }
++                    color: Appearance.colors.colOnLayer1
+                 }
+ 
+                 StyledText {
+-                    text: parent.parent.modelData.name
+-                    color: parent.parent.isCurrent
+-                        ? Appearance.colors.colOnLayer1
+-                        : Appearance.colors.colOnPrimaryContainer
+-                    Behavior on color { ColorAnimation { duration: 200 } }
++                    text: root.currentTab?.name ?? ""
++                    color: Appearance.colors.colOnLayer1
+                 }
+             }
++        }
+ 
+-            MouseArea {
+-                anchors.fill: parent
+-                cursorShape: Qt.PointingHandCursor
+-                hoverEnabled: true
+-                onClicked: {
+-                    if (!root.expanded) {
+-                        root.expanded = true
+-                        return
+-                    }
+-                    root.setCurrentIndex(parent.index)
+-                }
++        RippleButton {
++            id: nextButton
++            visible: root.multipleTabs
++            implicitWidth: root.cardHeight
++            implicitHeight: root.cardHeight
++            buttonRadius: Appearance.rounding.full
++            colBackground: Appearance.colors.colLayer2
++            colBackgroundHover: Appearance.colors.colLayer2Hover
++            colRipple: Appearance.colors.colLayer2Active
++            downAction: () => root.incrementCurrentIndex()
++            contentItem: MaterialSymbol {
++                text: "chevron_right" // ">" button
++                iconSize: Appearance.font.pixelSize.larger
++                horizontalAlignment: Text.AlignHCenter
++                color: Appearance.colors.colOnLayer1
+             }
+-
+-            DragHandler {
+-                id: dragHandler
+-                enabled: isCurrent
+-                target: null
+-                onTranslationChanged: {
+-                    if (translation.y < -20) {
+-                        root.expanded = false
+-                    } else if (translation.y > 20) {
+-                        root.expanded = true
+-                    }
+-                }
++            StyledToolTip {
++                text: Translation.tr("Next tab")
+             }
+         }
+     }
+-
+-    TabBar {
+-        id: tabBar
+-        z: -1
+-        background: null
+-        Repeater {
+-            model: root.tabButtonList.length
+-            delegate: TabButton { background: null }
+-        }
+-    }
+-}
+\ No newline at end of file
++}
+diff --git a/modules/ii/bar/Bar.qml b/modules/ii/bar/Bar.qml
+index 91c9ea6..af10b53 100644
+--- a/modules/ii/bar/Bar.qml
++++ b/modules/ii/bar/Bar.qml
+@@ -148,11 +148,13 @@ Scope {
+ 
+                     Item {
+                         id: hoverMaskRegion
+-                        anchors {
+-                            fill: barContent
+-                            topMargin: -Config.options.bar.autoHide.hoverRegionWidth
+-                            bottomMargin: -Config.options.bar.autoHide.hoverRegionWidth
+-                        }
++                        // Center-only + "Overlap windows": only the center island is clickable,
++                        // the rest of the bar strip passes clicks through to the window below.
++                        readonly property bool centerOnlyOverlap: barContent.centerOnly && Config.options.bar.centerOnlyReserveFrame
++                        x: centerOnlyOverlap ? barContent.x + barContent.centerMaskLeft : barContent.x
++                        y: barContent.y - Config.options.bar.autoHide.hoverRegionWidth
++                        width: centerOnlyOverlap ? Math.max(0, barContent.centerMaskRight - barContent.centerMaskLeft) : barContent.width
++                        height: barContent.height + Config.options.bar.autoHide.hoverRegionWidth * 2
+                     }
+ 
+                     BarContent {
+diff --git a/modules/ii/bar/BarContent.qml b/modules/ii/bar/BarContent.qml
+index 732a09b..9b11f0f 100644
+--- a/modules/ii/bar/BarContent.qml
++++ b/modules/ii/bar/BarContent.qml
+@@ -93,6 +93,17 @@ Item {
+         border.color: Config.options.bar.cornerStyle === 1 && !Config.options.bar.showBackground ? "transparent" : ColorUtils.transparentize(Appearance.colors.colLayer0Border, 0.8) 
+     }
+ 
++    // Horizontal extent (in this item's coordinates) of everything interactive in the center:
++    // pill, its round corners and the dynamic island side widgets. Used by Bar.qml to shrink
++    // the input mask so clicks outside it pass through to windows underneath.
++    readonly property real absCenterX: contentContainer.x + absoluteCenter.x
++    readonly property real centerMaskLeft: Math.min(
++        absCenterX - ((diLeftWidget.active && diLeftWidget.item) ? diLeftWidget.width + diLeftWidget.anchors.rightMargin : 0),
++        centerPillX - (leftPillCorner.visible ? leftPillCorner.implicitSize : 0))
++    readonly property real centerMaskRight: Math.max(
++        absCenterX + absoluteCenter.width + ((diRightWidget.active && diRightWidget.item) ? diRightWidget.width + diRightWidget.anchors.leftMargin : 0),
++        centerPillX + centerPillWidth + (rightPillCorner.visible ? rightPillCorner.implicitSize : 0))
++
+     // center-only
+     readonly property bool centerOnly: root.effectiveLeftLayout.length === 0
+         && root.effectiveRightLayout.length === 0
+diff --git a/modules/ii/cheatsheet/Cheatsheet.qml b/modules/ii/cheatsheet/Cheatsheet.qml
+new file mode 100644
+index 0000000..79b2380
+--- /dev/null
++++ b/modules/ii/cheatsheet/Cheatsheet.qml
+@@ -0,0 +1,223 @@
++import qs.services
++import qs.modules.common
++import qs.modules.common.widgets
++import QtQuick
++import QtQuick.Controls
++import QtQuick.Layouts
++import Qt.labs.synchronizer
++import Qt5Compat.GraphicalEffects
++import Quickshell.Io
++import Quickshell
++import Quickshell.Wayland
++import Quickshell.Hyprland
++
++Scope { // Scope
++    id: root
++    property var tabButtonList: [
++        {
++            "icon": "keyboard",
++            "name": Translation.tr("Keybinds")
++        },
++        {
++            "icon": "experiment",
++            "name": Translation.tr("Elements")
++        },
++    ]
++
++    Loader {
++        id: cheatsheetLoader
++        active: false
++
++        sourceComponent: PanelWindow { // Window
++            id: cheatsheetRoot
++            visible: cheatsheetLoader.active
++
++            anchors {
++                top: true
++                bottom: true
++                left: true
++                right: true
++            }
++
++            function hide() {
++                cheatsheetLoader.active = false;
++            }
++            exclusiveZone: 0
++            implicitWidth: cheatsheetBackground.width + Appearance.sizes.elevationMargin * 2
++            implicitHeight: cheatsheetBackground.height + Appearance.sizes.elevationMargin * 2
++            WlrLayershell.namespace: "quickshell:cheatsheet"
++            // Setting this value makes it take its sweet time to open
++            // WlrLayershell.keyboardFocus: WlrKeyboardFocus.OnDemand
++            color: "transparent"
++
++            mask: Region {
++                item: cheatsheetBackground
++            }
++
++            Component.onCompleted: {
++                GlobalFocusGrab.addDismissable(cheatsheetRoot);
++            }
++            Component.onDestruction: {
++                GlobalFocusGrab.removeDismissable(cheatsheetRoot);
++            }
++            Connections {
++                target: GlobalFocusGrab
++                function onDismissed() {
++                    cheatsheetRoot.hide();
++                }
++            }
++
++            // Background
++            StyledRectangularShadow {
++                target: cheatsheetBackground
++            }
++            Rectangle {
++                id: cheatsheetBackground
++                anchors.centerIn: parent
++                color: Appearance.colors.colLayer0
++                border.width: 1
++                border.color: Appearance.colors.colLayer0Border
++                radius: Appearance.rounding.windowRounding
++                property real padding: 20
++                implicitWidth: cheatsheetColumnLayout.implicitWidth + padding * 2
++                implicitHeight: cheatsheetColumnLayout.implicitHeight + padding * 2
++
++                Keys.onPressed: event => { // Esc to close
++                    if (event.key === Qt.Key_Escape) {
++                        cheatsheetRoot.hide();
++                    }
++                    if (event.modifiers === Qt.ControlModifier) {
++                        if (event.key === Qt.Key_PageDown) {
++                            tabBar.incrementCurrentIndex();
++                            event.accepted = true;
++                        } else if (event.key === Qt.Key_PageUp) {
++                            tabBar.decrementCurrentIndex();
++                            event.accepted = true;
++                        } else if (event.key === Qt.Key_Tab) {
++                            tabBar.setCurrentIndex((tabBar.currentIndex + 1) % root.tabButtonList.length);
++                            event.accepted = true;
++                        } else if (event.key === Qt.Key_Backtab) {
++                            tabBar.setCurrentIndex((tabBar.currentIndex - 1 + root.tabButtonList.length) % root.tabButtonList.length);
++                            event.accepted = true;
++                        }
++                    }
++                }
++
++                RippleButton { // Close button
++                    id: closeButton
++                    focus: cheatsheetRoot.visible
++                    implicitWidth: 40
++                    implicitHeight: 40
++                    buttonRadius: Appearance.rounding.full
++                    anchors {
++                        top: parent.top
++                        right: parent.right
++                        topMargin: 20
++                        rightMargin: 20
++                    }
++
++                    onClicked: {
++                        cheatsheetRoot.hide();
++                    }
++
++                    contentItem: MaterialSymbol {
++                        anchors.centerIn: parent
++                        horizontalAlignment: Text.AlignHCenter
++                        font.pixelSize: Appearance.font.pixelSize.title
++                        text: "close"
++                    }
++                }
++
++                ColumnLayout { // Real content
++                    id: cheatsheetColumnLayout
++                    anchors.centerIn: parent
++                    spacing: 10
++
++                    Toolbar {
++                        Layout.alignment: Qt.AlignHCenter
++                        enableShadow: false
++                        ToolbarTabBar {
++                            id: tabBar
++                            tabButtonList: root.tabButtonList
++
++                            Synchronizer on currentIndex {
++                                property alias source: swipeView.currentIndex
++                            }
++                        }
++                    }
++
++                    SwipeView { // Content pages
++                        id: swipeView
++                        Layout.topMargin: 5
++                        Layout.fillWidth: true
++                        Layout.fillHeight: true
++                        spacing: 10
++                        currentIndex: Persistent.states.cheatsheet.tabIndex
++                        onCurrentIndexChanged: {
++                            Persistent.states.cheatsheet.tabIndex = currentIndex;
++                        }
++
++                        implicitWidth: Math.max.apply(null, contentChildren.map(child => child.implicitWidth || 0))
++                        implicitHeight: Math.max.apply(null, contentChildren.map(child => child.implicitHeight || 0))
++
++                        clip: true
++                        layer.enabled: true
++                        layer.effect: OpacityMask {
++                            maskSource: Rectangle {
++                                width: swipeView.width
++                                height: swipeView.height
++                                radius: Appearance.rounding.small
++                            }
++                        }
++
++                        CheatsheetKeybinds {}
++                        CheatsheetPeriodicTable {}
++                    }
++                }
++            }
++        }
++    }
++
++    IpcHandler {
++        target: "cheatsheet"
++
++        function toggle(): void {
++            cheatsheetLoader.active = !cheatsheetLoader.active;
++        }
++
++        function close(): void {
++            cheatsheetLoader.active = false;
++        }
++
++        function open(): void {
++            cheatsheetLoader.active = true;
++        }
++    }
++
++    GlobalShortcut {
++        name: "cheatsheetToggle"
++        description: "Toggles cheatsheet on press"
++
++        onPressed: {
++            cheatsheetLoader.active = !cheatsheetLoader.active;
++        }
++    }
++
++    GlobalShortcut {
++        name: "cheatsheetOpen"
++        description: "Opens cheatsheet on press"
++
++        onPressed: {
++            cheatsheetLoader.active = true;
++        }
++    }
++
++    GlobalShortcut {
++        name: "cheatsheetClose"
++        description: "Closes cheatsheet on press"
++
++        onPressed: {
++            cheatsheetLoader.active = false;
++        }
++    }
++}
+diff --git a/modules/ii/cheatsheet/CheatsheetKeybinds.qml b/modules/ii/cheatsheet/CheatsheetKeybinds.qml
+new file mode 100644
+index 0000000..e4bccb7
+--- /dev/null
++++ b/modules/ii/cheatsheet/CheatsheetKeybinds.qml
+@@ -0,0 +1,47 @@
++pragma ComponentBehavior: Bound
++
++import qs.services
++import qs.modules.common
++import qs.modules.common.widgets
++import QtQuick
++import QtQuick.Layouts
++import Quickshell
++
++// Adapted for end4-pC's tree-based HyprlandKeybinds service
++// (upstream illogical-impulse used a flat `keybindCategories` list;
++// end4-pC exposes `HyprlandKeybinds.keybinds.children`, a tree of
++// {children, keybinds, name} sections instead)
++Item {
++    id: root
++    property real padding: 4
++    implicitWidth: QsWindow?.window?.screen.width * 0.7 ?? 0
++    implicitHeight: QsWindow?.window?.screen.height * 0.7 ?? 0
++
++    StyledFlickable {
++        id: flickable
++        clip: true
++        anchors.fill: parent
++        anchors.margins: Appearance.rounding.small
++        contentHeight: height
++        contentWidth: flow.implicitWidth
++        Flow {
++            id: flow
++            height: flickable.height
++            flow: Flow.TopToBottom
++            spacing: 10
++            Repeater {
++                model: HyprlandKeybinds.keybinds.children ?? []
++                delegate: CheatsheetKeybindsCategory {
++                    required property var modelData
++                    section: modelData
++                }
++            }
++        }
++    }
++
++    ScrollEdgeFade {
++        target: flickable
++        vertical: false
++        color: Appearance.colors.colLayer0Base
++    }
++}
+diff --git a/modules/ii/cheatsheet/CheatsheetKeybindsCategory.qml b/modules/ii/cheatsheet/CheatsheetKeybindsCategory.qml
+new file mode 100644
+index 0000000..b54fd60
+--- /dev/null
++++ b/modules/ii/cheatsheet/CheatsheetKeybindsCategory.qml
+@@ -0,0 +1,127 @@
++pragma ComponentBehavior: Bound
++
++import qs.modules.common
++import qs.modules.common.widgets
++import QtQuick
++import QtQuick.Layouts
++import Quickshell
++
++// Adapted for end4-pC's tree-based HyprlandKeybinds service.
++// `section` is one node from HyprlandKeybinds.keybinds.children:
++//   { children: [Section...], keybinds: [KeyBinding...], name: string }
++// where KeyBinding = { mods: [string], key: string, dispatcher, params, comment }
++// (end4-pC's parser already gives us human-readable mod names, e.g.
++// "SUPER", "SHIFT", so there's no bitmask to decode like upstream had to)
++Column {
++    id: root
++    required property var section
++    property real columnSpacing: 40
++    property real titleSpacing: 7
++
++    // Cosmetic renames only; extend as you like
++    property var keySubstitutions: ({
++        "SUPER": "Super",
++        "Slash": "/",
++        "Hash": "#",
++        "Return": "Enter",
++        "mouse:272": "LMB",
++        "mouse:273": "RMB",
++        "mouse:275": "MouseBack",
++    })
++
++    function hasComment(bind) {
++        return !!bind.comment && bind.comment.length > 0;
++    }
++
++    // Loop-generated binds (workspace 1-10, resize left/right/up/down, etc.)
++    // repeat the same comment N times - keep only the "first" of each group
++    function containsNonFirstRepetitive(bind) {
++        const key = bind.key || "";
++        if (key.toLowerCase().includes("mouse")) return false;
++        if (/\d/.test(key) && !key.includes("1")) return true;
++        if (/^(right|up|down)\b/i.test(key)) return true;
++        return false;
++    }
++
++    function transformKey(key) {
++        const replaced = root.keySubstitutions[key] || key;
++        const denumbered = replaced.replace("1", "<Number>");
++        const dedirectioned = denumbered.replace(/^left$/i, "<Direction>");
++        return dedirectioned;
++    }
++
++    function transformMod(mod) {
++        return root.keySubstitutions[mod] || mod;
++    }
++
++    // Recursively gather every keybind under this section (including
++    // nested subsections) so one category header covers its whole tree
++    function collectBinds(node) {
++        let result = (node.keybinds ?? []).filter(b => root.hasComment(b) && !root.containsNonFirstRepetitive(b));
++        for (const child of (node.children ?? [])) {
++            result = result.concat(root.collectBinds(child));
++        }
++        return result;
++    }
++
++    property var binds: root.collectBinds(root.section)
++
++    visible: binds.length > 0
++    spacing: titleSpacing
++
++    StyledText {
++        text: (root.section.name?.length > 0) ? root.section.name : qsTr("Uncategorized")
++        font.pixelSize: Appearance.font.pixelSize.title
++    }
++
++    Column {
++        spacing: 4
++        Repeater {
++            model: root.binds
++            delegate: BindLine {
++                required property var modelData
++                keyData: modelData
++            }
++        }
++    }
++
++    component BindLine: Row {
++        id: bindLine
++        required property var keyData
++
++        Row {
++            spacing: 16
++            Row {
++                spacing: 4
++                Repeater {
++                    model: (bindLine.keyData.mods ?? []).map(m => root.transformMod(m))
++                    delegate: KeyboardKey {
++                        required property var modelData
++                        key: modelData
++                    }
++                }
++                StyledText {
++                    anchors.verticalCenter: parent.verticalCenter
++                    visible: (bindLine.keyData.mods ?? []).length > 0
++                    text: "+"
++                }
++                KeyboardKey {
++                    anchors.verticalCenter: parent.verticalCenter
++                    key: root.transformKey(bindLine.keyData.key)
++                }
++            }
++            Item {
++                anchors.verticalCenter: parent.verticalCenter
++                implicitWidth: commentText.implicitWidth + root.columnSpacing
++                implicitHeight: commentText.implicitHeight
++                StyledText {
++                    id: commentText
++                    anchors.verticalCenter: parent.verticalCenter
++                    anchors.left: parent.left
++                    font.pixelSize: Appearance.font.pixelSize.smaller
++                    text: bindLine.keyData.comment
++                }
++            }
++        }
++    }
++}
+diff --git a/modules/ii/cheatsheet/CheatsheetPeriodicTable.qml b/modules/ii/cheatsheet/CheatsheetPeriodicTable.qml
+new file mode 100644
+index 0000000..6262ed7
+--- /dev/null
++++ b/modules/ii/cheatsheet/CheatsheetPeriodicTable.qml
+@@ -0,0 +1,63 @@
++import "periodic_table.js" as PTable
++import QtQuick
++
++Item {
++    id: root
++    readonly property var elements: PTable.elements
++    readonly property var series: PTable.series
++    property real spacing: 6
++    implicitWidth: mainLayout.implicitWidth
++    implicitHeight: mainLayout.implicitHeight
++
++    Column {
++        id: mainLayout
++        anchors.centerIn: parent
++        spacing: root.spacing
++
++        Repeater { // Main table rows
++            model: root.elements
++            
++            delegate: Row { // Table cells
++                id: tableRow
++                spacing: root.spacing
++                required property var modelData
++                
++                Repeater {
++                    model: tableRow.modelData
++                    delegate: ElementTile {
++                        required property var modelData
++                        element: modelData
++                    }
++
++                }
++            }
++            
++        }
++
++        Item {
++            id: gap
++            implicitHeight: 20
++        }
++
++        Repeater { // Main table rows
++            model: root.series
++            
++            delegate: Row { // Table cells
++                id: seriesTableRow
++                spacing: root.spacing
++                required property var modelData
++                
++                Repeater {
++                    model: seriesTableRow.modelData
++                    delegate: ElementTile {
++                        required property var modelData
++                        element: modelData
++                    }
++
++                }
++            }
++            
++        }
++    }
++    
++}
+\ No newline at end of file
+diff --git a/modules/ii/cheatsheet/ElementTile.qml b/modules/ii/cheatsheet/ElementTile.qml
+new file mode 100644
+index 0000000..e05b76a
+--- /dev/null
++++ b/modules/ii/cheatsheet/ElementTile.qml
+@@ -0,0 +1,78 @@
++import qs.modules.common
++import qs.modules.common.functions
++import qs.modules.common.widgets
++import QtQuick
++
++RippleButton {
++    id: root
++    required property var element
++    opacity: element.type != "empty" ? 1 : 0
++    implicitHeight: 70
++    implicitWidth: 70
++    colBackground: Appearance.colors.colLayer2
++    buttonRadius: Appearance.rounding.small
++
++    Rectangle {
++        anchors {
++            top: parent.top
++            left: parent.left
++            topMargin: 4
++            leftMargin: 4
++        }
++        color: ColorUtils.transparentize(Appearance.colors.colLayer2)
++        radius: Appearance.rounding.full
++        implicitWidth: Math.max(20, elementNumber.implicitWidth)
++        implicitHeight: Math.max(20, elementNumber.implicitHeight)
++        width: height
++
++        StyledText {
++            id: elementNumber
++            anchors.left: parent.left
++            color: Appearance.colors.colOnLayer2
++            text: root.element.number
++            font.pixelSize: Appearance.font.pixelSize.smallest
++        }
++    }
++
++    Rectangle {
++        anchors {
++            top: parent.top
++            right: parent.right
++            topMargin: 4
++            rightMargin: 4
++        }
++        color: ColorUtils.transparentize(Appearance.colors.colLayer2)
++        radius: Appearance.rounding.full
++        implicitWidth: Math.max(20, elementWeight.implicitWidth)
++        implicitHeight: Math.max(20, elementWeight.implicitHeight)
++        width: height
++
++        StyledText {
++            id: elementWeight
++            anchors.right: parent.right
++            color: Appearance.colors.colOnLayer2
++            text: root.element.weight
++            font.pixelSize: Appearance.font.pixelSize.smallest
++        }
++    }
++
++    StyledText {
++        id: elementSymbol
++        anchors.centerIn: parent
++        color: Appearance.colors.colSecondary
++        font.pixelSize: Appearance.font.pixelSize.huge
++        text: root.element.symbol
++    }
++
++    StyledText {
++        id: elementName
++        anchors {
++            horizontalCenter: parent.horizontalCenter
++            bottom: parent.bottom
++            bottomMargin: 4
++        }
++        font.pixelSize: Appearance.font.pixelSize.smallest
++        color: Appearance.colors.colOnLayer2
++        text: root.element.name
++    }
++}
+diff --git a/modules/ii/cheatsheet/periodic_table.js b/modules/ii/cheatsheet/periodic_table.js
+new file mode 100644
+index 0000000..45d69cc
+--- /dev/null
++++ b/modules/ii/cheatsheet/periodic_table.js
+@@ -0,0 +1,196 @@
++// List of rows
++const elements = [
++    [
++        { name: 'Hydrogen', symbol: 'H', number: 1, weight: 1.01, type: 'nonmetal' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: 'Helium', symbol: 'He', number: 2, weight: 4.00, type: 'noblegas' },
++    ],
++    [
++        { name: 'Lithium', symbol: 'Li', number: 3, weight: 6.94, type: 'metal' },
++        { name: 'Beryllium', symbol: 'Be', number: 4, weight: 9.01, type: 'metal' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: 'Boron', symbol: 'B', number: 5, weight: 10.81, type: 'nonmetal' },
++        { name: 'Carbon', symbol: 'C', number: 6, weight: 12.01, type: 'nonmetal' },
++        { name: 'Nitrogen', symbol: 'N', number: 7, weight: 14.01, type: 'nonmetal' },
++        { name: 'Oxygen', symbol: 'O', number: 8, weight: 16, type: 'nonmetal' },
++        { name: 'Fluorine', symbol: 'F', number: 9, weight: 19, type: 'nonmetal' },
++        { name: 'Neon', symbol: 'Ne', number: 10, weight: 20.18, type: 'noblegas' },
++
++
++    ],
++    [
++        { name: 'Sodium', symbol: 'Na', number: 11, weight: 22.99, type: 'metal' },
++        { name: 'Magnesium', symbol: 'Mg', number: 12, weight: 24.31, type: 'metal' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: 'Aluminum', symbol: 'Al', number: 13, weight: 26.98, type: 'metal' },
++        { name: 'Silicon', symbol: 'Si', number: 14, weight: 28.09, type: 'nonmetal' },
++        { name: 'Phosphorus', symbol: 'P', number: 15, weight: 30.97, type: 'nonmetal' },
++        { name: 'Sulfur', symbol: 'S', number: 16, weight: 32.07, type: 'nonmetal' },
++        { name: 'Chlorine', symbol: 'Cl', number: 17, weight: 35.45, type: 'nonmetal' },
++        { name: 'Argon', symbol: 'Ar', number: 18, weight: 39.95, type: 'noblegas' },
++    ],
++    [
++        { name: 'Potassium', symbol: 'K', number: 19, weight: 39.098, type: 'metal' },
++        { name: 'Calcium', symbol: 'Ca', number: 20, weight: 40.078, type: 'metal' },
++        { name: 'Scandium', symbol: 'Sc', number: 21, weight: 44.956, type: 'metal' },
++        { name: 'Titanium', symbol: 'Ti', number: 22, weight: 47.87, type: 'metal' },
++        { name: 'Vanadium', symbol: 'V', number: 23, weight: 50.94, type: 'metal' },
++        { name: 'Chromium', symbol: 'Cr', number: 24, weight: 52, type: 'metal'/*, icon: 'chromium-browser'*/ },
++        { name: 'Manganese', symbol: 'Mn', number: 25, weight: 54.94, type: 'metal' },
++        { name: 'Iron', symbol: 'Fe', number: 26, weight: 55.85, type: 'metal' },
++        { name: 'Cobalt', symbol: 'Co', number: 27, weight: 58.93, type: 'metal' },
++        { name: 'Nickel', symbol: 'Ni', number: 28, weight: 58.69, type: 'metal' },
++        { name: 'Copper', symbol: 'Cu', number: 29, weight: 63.55, type: 'metal' },
++        { name: 'Zinc', symbol: 'Zn', number: 30, weight: 65.38, type: 'metal' },
++        { name: 'Gallium', symbol: 'Ga', number: 31, weight: 69.72, type: 'metal' },
++        { name: 'Germanium', symbol: 'Ge', number: 32, weight: 72.63, type: 'metal' },
++        { name: 'Arsenic', symbol: 'As', number: 33, weight: 74.92, type: 'nonmetal' },
++        { name: 'Selenium', symbol: 'Se', number: 34, weight: 78.96, type: 'nonmetal' },
++        { name: 'Bromine', symbol: 'Br', number: 35, weight: 79.904, type: 'nonmetal' },
++        { name: 'Krypton', symbol: 'Kr', number: 36, weight: 83.8, type: 'noblegas' },
++    ],
++    [
++        { name: 'Rubidium', symbol: 'Rb', number: 37, weight: 85.47, type: 'metal' },
++        { name: 'Strontium', symbol: 'Sr', number: 38, weight: 87.62, type: 'metal' },
++        { name: 'Yttrium', symbol: 'Y', number: 39, weight: 88.91, type: 'metal' },
++        { name: 'Zirconium', symbol: 'Zr', number: 40, weight: 91.22, type: 'metal' },
++        { name: 'Niobium', symbol: 'Nb', number: 41, weight: 92.91, type: 'metal' },
++        { name: 'Molybdenum', symbol: 'Mo', number: 42, weight: 95.94, type: 'metal' },
++        { name: 'Technetium', symbol: 'Tc', number: 43, weight: 98, type: 'metal' },
++        { name: 'Ruthenium', symbol: 'Ru', number: 44, weight: 101.07, type: 'metal' },
++        { name: 'Rhodium', symbol: 'Rh', number: 45, weight: 102.91, type: 'metal' },
++        { name: 'Palladium', symbol: 'Pd', number: 46, weight: 106.42, type: 'metal' },
++        { name: 'Silver', symbol: 'Ag', number: 47, weight: 107.87, type: 'metal' },
++        { name: 'Cadmium', symbol: 'Cd', number: 48, weight: 112.41, type: 'metal' },
++        { name: 'Indium', symbol: 'In', number: 49, weight: 114.82, type: 'metal' },
++        { name: 'Tin', symbol: 'Sn', number: 50, weight: 118.71, type: 'metal' },
++        { name: 'Antimony', symbol: 'Sb', number: 51, weight: 121.76, type: 'metal' },
++        { name: 'Tellurium', symbol: 'Te', number: 52, weight: 127.6, type: 'nonmetal' },
++        { name: 'Iodine', symbol: 'I', number: 53, weight: 126.9, type: 'nonmetal' },
++        { name: 'Xenon', symbol: 'Xe', number: 54, weight: 131.29, type: 'noblegas' },
++    ],
++    [
++        { name: 'Cesium', symbol: 'Cs', number: 55, weight: 132.91, type: 'metal' },
++        { name: 'Barium', symbol: 'Ba', number: 56, weight: 137.33, type: 'metal' },
++        { name: 'Lanthanum', symbol: 'La', number: 57, weight: 138.91, type: 'lanthanum' },
++        { name: 'Hafnium', symbol: 'Hf', number: 72, weight: 178.49, type: 'metal' },
++        { name: 'Tantalum', symbol: 'Ta', number: 73, weight: 180.95, type: 'metal' },
++        { name: 'Tungsten', symbol: 'W', number: 74, weight: 183.84, type: 'metal' },
++        { name: 'Rhenium', symbol: 'Re', number: 75, weight: 186.21, type: 'metal' },
++        { name: 'Osmium', symbol: 'Os', number: 76, weight: 190.23, type: 'metal' },
++        { name: 'Iridium', symbol: 'Ir', number: 77, weight: 192.22, type: 'metal' },
++        { name: 'Platinum', symbol: 'Pt', number: 78, weight: 195.09, type: 'metal' },
++        { name: 'Gold', symbol: 'Au', number: 79, weight: 196.97, type: 'metal' },
++        { name: 'Mercury', symbol: 'Hg', number: 80, weight: 200.59, type: 'metal' },
++        { name: 'Thallium', symbol: 'Tl', number: 81, weight: 204.38, type: 'metal' },
++        { name: 'Lead', symbol: 'Pb', number: 82, weight: 207.2, type: 'metal' },
++        { name: 'Bismuth', symbol: 'Bi', number: 83, weight: 208.98, type: 'metal' },
++        { name: 'Polonium', symbol: 'Po', number: 84, weight: 209, type: 'metal' },
++        { name: 'Astatine', symbol: 'At', number: 85, weight: 210, type: 'nonmetal' },
++        { name: 'Radon', symbol: 'Rn', number: 86, weight: 222, type: 'noblegas' },
++    ],
++    [
++        { name: 'Francium', symbol: 'Fr', number: 87, weight: 223, type: 'metal' },
++        { name: 'Radium', symbol: 'Ra', number: 88, weight: 226, type: 'metal' },
++        { name: 'Actinium', symbol: 'Ac', number: 89, weight: 227, type: 'actinium' },
++        { name: 'Rutherfordium', symbol: 'Rf', number: 104, weight: 267, type: 'metal' },
++        { name: 'Dubnium', symbol: 'Db', number: 105, weight: 268, type: 'metal' },
++        { name: 'Seaborgium', symbol: 'Sg', number: 106, weight: 271, type: 'metal' },
++        { name: 'Bohrium', symbol: 'Bh', number: 107, weight: 272, type: 'metal' },
++        { name: 'Hassium', symbol: 'Hs', number: 108, weight: 277, type: 'metal' },
++        { name: 'Meitnerium', symbol: 'Mt', number: 109, weight: 278, type: 'metal' },
++        { name: 'Darmstadtium', symbol: 'Ds', number: 110, weight: 281, type: 'metal' },
++        { name: 'Roentgenium', symbol: 'Rg', number: 111, weight: 280, type: 'metal' },
++        { name: 'Copernicium', symbol: 'Cn', number: 112, weight: 285, type: 'metal' },
++        { name: 'Nihonium', symbol: 'Nh', number: 113, weight: 286, type: 'metal' },
++        { name: 'Flerovium', symbol: 'Fl', number: 114, weight: 289, type: 'metal' },
++        { name: 'Moscovium', symbol: 'Mc', number: 115, weight: 290, type: 'metal' },
++        { name: 'Livermorium', symbol: 'Lv', number: 116, weight: 293, type: 'metal' },
++        { name: 'Tennessine', symbol: 'Ts', number: 117, weight: 294, type: 'metal' },
++        { name: 'Oganesson', symbol: 'Og', number: 118, weight: 294, type: 'noblegas' },
++    ],
++]
++
++const series = [
++    [
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: 'Cerium', symbol: 'Ce', number: 58, weight: 140.12, type: 'lanthanum' },
++        { name: 'Praseodymium', symbol: 'Pr', number: 59, weight: 140.91, type: 'lanthanum' },
++        { name: 'Neodymium', symbol: 'Nd', number: 60, weight: 144.24, type: 'lanthanum' },
++        { name: 'Promethium', symbol: 'Pm', number: 61, weight: 145, type: 'lanthanum' },
++        { name: 'Samarium', symbol: 'Sm', number: 62, weight: 150.36, type: 'lanthanum' },
++        { name: 'Europium', symbol: 'Eu', number: 63, weight: 151.96, type: 'lanthanum' },
++        { name: 'Gadolinium', symbol: 'Gd', number: 64, weight: 157.25, type: 'lanthanum' },
++        { name: 'Terbium', symbol: 'Tb', number: 65, weight: 158.93, type: 'lanthanum' },
++        { name: 'Dysprosium', symbol: 'Dy', number: 66, weight: 162.5, type: 'lanthanum' },
++        { name: 'Holmium', symbol: 'Ho', number: 67, weight: 164.93, type: 'lanthanum' },
++        { name: 'Erbium', symbol: 'Er', number: 68, weight: 167.26, type: 'lanthanum' },
++        { name: 'Thulium', symbol: 'Tm', number: 69, weight: 168.93, type: 'lanthanum' },
++        { name: 'Ytterbium', symbol: 'Yb', number: 70, weight: 173.04, type: 'lanthanum' },
++        { name: 'Lutetium', symbol: 'Lu', number: 71, weight: 174.97, type: 'lanthanum' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++    ],
++    [
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++        { name: 'Thorium', symbol: 'Th', number: 90, weight: 232.04, type: 'actinium' },
++        { name: 'Protactinium', symbol: 'Pa', number: 91, weight: 231.04, type: 'actinium' },
++        { name: 'Uranium', symbol: 'U', number: 92, weight: 238.03, type: 'actinium' },
++        { name: 'Neptunium', symbol: 'Np', number: 93, weight: 237, type: 'actinium' },
++        { name: 'Plutonium', symbol: 'Pu', number: 94, weight: 244, type: 'actinium' },
++        { name: 'Americium', symbol: 'Am', number: 95, weight: 243, type: 'actinium' },
++        { name: 'Curium', symbol: 'Cm', number: 96, weight: 247, type: 'actinium' },
++        { name: 'Berkelium', symbol: 'Bk', number: 97, weight: 247, type: 'actinium' },
++        { name: 'Californium', symbol: 'Cf', number: 98, weight: 251, type: 'actinium' },
++        { name: 'Einsteinium', symbol: 'Es', number: 99, weight: 252, type: 'actinium' },
++        { name: 'Fermium', symbol: 'Fm', number: 100, weight: 257, type: 'actinium' },
++        { name: 'Mendelevium', symbol: 'Md', number: 101, weight: 258, type: 'actinium' },
++        { name: 'Nobelium', symbol: 'No', number: 102, weight: 259, type: 'actinium' },
++        { name: 'Lawrencium', symbol: 'Lr', number: 103, weight: 262, type: 'actinium' },
++        { name: '', symbol: '', number: -1, weight: 0, type: 'empty' },
++    ],
++];
++
++const niceTypes = {
++    'metal': "Metal",
++    'nonmetal': "Nonmetal",
++    'noblegas': "Noble gas",
++    'lanthanum': "Lanthanum",
++    'actinium': "Actinium"
++}
+diff --git a/modules/ii/overview/Overview.qml b/modules/ii/overview/Overview.qml
+index 76e1032..4749d71 100644
+--- a/modules/ii/overview/Overview.qml
++++ b/modules/ii/overview/Overview.qml
+@@ -61,7 +61,13 @@ Scope {
+                     GlobalFocusGrab.dismiss();
+                 } else {
+                     if (!overviewScope.dontAutoCancelSearch) {
+-                        searchWidget.cancelSearch();
++                        if (Config.options.overview.superPreview) {
++                            searchWidget.cancelSearch();
++                        } else {
++                            // Super Preview disabled: skip the workspace/window
++                            // preview grid and jump straight into the apps list.
++                            panelWindow.setSearchingText(Config.options.search.prefix.app);
++                        }
+                     }
+                     GlobalFocusGrab.addDismissable(panelWindow);
+                 }
+diff --git a/modules/ii/settings/pages/HyprlandConfig.qml b/modules/ii/settings/pages/HyprlandConfig.qml
+index bdb5b93..6c6d9a8 100644
+--- a/modules/ii/settings/pages/HyprlandConfig.qml
++++ b/modules/ii/settings/pages/HyprlandConfig.qml
+@@ -560,6 +560,19 @@ ContentPage {
+                         buttonIcon: "front_hand"
+                         text: Translation.tr("Left-handed buttons")
+                     }
++                    HyprOptionSwitch {
++                        optionKey: "input:natural_scroll"
++                        buttonIcon: "swap_vert"
++                        text: Translation.tr("Mouse natural scroll")
++                    }
++                    HyprOptionSpinBox {
++                        optionKey: "input:scroll_factor"
++                        icon: "unfold_more"
++                        text: Translation.tr("Mouse scroll factor")
++                        fallback: 1
++                        factor: 10
++                        from: 1; to: 30; stepSize: 1
++                    }
+                     HyprOptionSwitch {
+                         optionKey: "misc:middle_click_paste"
+                         buttonIcon: "content_paste"
+diff --git a/modules/ii/settings/pages/InterfaceConfig.qml b/modules/ii/settings/pages/InterfaceConfig.qml
+index 965e892..b959d5f 100644
+--- a/modules/ii/settings/pages/InterfaceConfig.qml
++++ b/modules/ii/settings/pages/InterfaceConfig.qml
+@@ -615,6 +615,14 @@ ContentPage {
+                         Config.options.overview.enable = checked;
+                     }
+                 }
++                ConfigSwitch {
++                    buttonIcon: "preview"
++                    text: Translation.tr("Super Preview")
++                    checked: Config.options.overview.superPreview
++                    onCheckedChanged: {
++                        Config.options.overview.superPreview = checked;
++                    }
++                }
+                 ConfigSwitch {
+                     buttonIcon: "center_focus_strong"
+                     text: Translation.tr("Center icons")
+diff --git a/modules/ii/settings/pages/WidgetsConfig.qml b/modules/ii/settings/pages/WidgetsConfig.qml
+new file mode 100644
+index 0000000..bf61c19
+--- /dev/null
++++ b/modules/ii/settings/pages/WidgetsConfig.qml
+@@ -0,0 +1,319 @@
++import QtQuick
++import QtQuick.Layouts
++import qs
++import qs.services
++import qs.modules.common
++import qs.modules.common.widgets
++import qs.modules.common.functions
++
++// Widget options that have no control anywhere else in the settings app
++// (plus the tray panel). Everything else stays on its existing tab.
++ContentPage {
++    id: page
++    forceWidth: true
++
++    ColumnLayout {
++        Layout.fillWidth: true
++        Layout.fillHeight: true
++        spacing: 20
++
++        ContentSection {
++            icon: "widgets"
++            shape: MaterialShape.Shape.Gem
++            title: Translation.tr("Tray Panel")
++
++            NoticeBox {
++                Layout.fillWidth: true
++                text: Translation.tr("Open it by setting a hot corner to \"Tray Panel\" in Interface > Hot Corners")
++            }
++
++            GroupedList {
++            ConfigSelectionArray {
++                text: Translation.tr("Placement")
++                icon: "open_with"
++                currentValue: Config.options.trayPanel.placement
++                onSelected: newValue => { Config.options.trayPanel.placement = newValue }
++                options: [
++                    { displayName: Translation.tr("Near bar"), icon: "toolbar", value: "bar" },
++                    { displayName: Translation.tr("Top-left"), icon: "north_west", value: "topLeft" },
++                    { displayName: Translation.tr("Top-right"), icon: "north_east", value: "topRight" },
++                    { displayName: Translation.tr("Bottom-left"), icon: "south_west", value: "bottomLeft" },
++                    { displayName: Translation.tr("Bottom-right"), icon: "south_east", value: "bottomRight" },
++                    { displayName: Translation.tr("Center"), icon: "center_focus_strong", value: "center" }
++                ]
++            }
++            ConfigSpinBox {
++                icon: "view_column"
++                text: Translation.tr("Columns")
++                value: Config.options.trayPanel.columns
++                from: 1; to: 8; stepSize: 1
++                onValueChanged: { Config.options.trayPanel.columns = value }
++            }
++            ConfigSpinBox {
++                icon: "aspect_ratio"
++                text: Translation.tr("Tile size")
++                value: Config.options.trayPanel.tileSize
++                from: 56; to: 160; stepSize: 4
++                onValueChanged: { Config.options.trayPanel.tileSize = value }
++            }
++            ConfigSpinBox {
++                icon: "rounded_corner"
++                text: Translation.tr("Corner radius")
++                value: Config.options.trayPanel.cornerRadius
++                from: 8; to: 40; stepSize: 1
++                onValueChanged: { Config.options.trayPanel.cornerRadius = value }
++            }
++            ConfigSwitch {
++                buttonIcon: "label"
++                text: Translation.tr("Show app names")
++                checked: Config.options.trayPanel.showLabels
++                onCheckedChanged: { Config.options.trayPanel.showLabels = checked }
++            }
++            ConfigSwitch {
++                buttonIcon: "visibility_off"
++                text: Translation.tr("Hide inactive apps")
++                checked: Config.options.trayPanel.hideInactive
++                onCheckedChanged: { Config.options.trayPanel.hideInactive = checked }
++            }
++            ConfigSwitch {
++                buttonIcon: "animation"
++                text: Translation.tr("Animations")
++                checked: Config.options.trayPanel.animate
++                onCheckedChanged: { Config.options.trayPanel.animate = checked }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "inbox_customize"
++            shape: MaterialShape.Shape.Square
++            title: Translation.tr("Bar tray")
++
++            GroupedList {
++            ConfigSwitch {
++                buttonIcon: "badge"
++                text: Translation.tr("Show item IDs")
++                checked: Config.options.tray.showItemId
++                onCheckedChanged: { Config.options.tray.showItemId = checked }
++            }
++            ConfigSwitch {
++                buttonIcon: "filter_alt"
++                text: Translation.tr("Hide passive items")
++                checked: Config.options.tray.filterPassive
++                onCheckedChanged: { Config.options.tray.filterPassive = checked }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "steppers"
++            shape: MaterialShape.Shape.Cookie12Sided
++            title: Translation.tr("Workspaces")
++
++            GroupedList {
++            ConfigSwitch {
++                buttonIcon: "contrast"
++                text: Translation.tr("Monochrome icons")
++                checked: Config.options.bar.workspaces.monochromeIcons
++                onCheckedChanged: { Config.options.bar.workspaces.monochromeIcons = checked }
++            }
++            ConfigSpinBox {
++                enabled: !Config.options.bar.workspaces.alwaysShowNumbers
++                icon: "timer"
++                text: Translation.tr("Number delay (ms)")
++                value: Config.options.bar.workspaces.showNumberDelay
++                from: 0; to: 2000; stepSize: 50
++                onValueChanged: { Config.options.bar.workspaces.showNumberDelay = value }
++            }
++            ConfigSwitch {
++                buttonIcon: "font_download"
++                text: Translation.tr("Use Nerd Font")
++                checked: Config.options.bar.workspaces.useNerdFont
++                onCheckedChanged: { Config.options.bar.workspaces.useNerdFont = checked }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "empty_dashboard"
++            shape: MaterialShape.Shape.Burst
++            title: Translation.tr("Resources")
++
++            GroupedList {
++            ConfigSpinBox {
++                icon: "memory"
++                text: Translation.tr("RAM warning (%)")
++                value: Config.options.bar.resources.memoryWarningThreshold
++                from: 50; to: 100; stepSize: 5
++                onValueChanged: { Config.options.bar.resources.memoryWarningThreshold = value }
++            }
++            ConfigSpinBox {
++                icon: "swap_horiz"
++                text: Translation.tr("Swap warning (%)")
++                value: Config.options.bar.resources.swapWarningThreshold
++                from: 50; to: 100; stepSize: 5
++                onValueChanged: { Config.options.bar.resources.swapWarningThreshold = value }
++            }
++            ConfigSpinBox {
++                icon: "planner_review"
++                text: Translation.tr("CPU warning (%)")
++                value: Config.options.bar.resources.cpuWarningThreshold
++                from: 50; to: 100; stepSize: 5
++                onValueChanged: { Config.options.bar.resources.cpuWarningThreshold = value }
++            }
++            ConfigSpinBox {
++                icon: "show_chart"
++                text: Translation.tr("History length (samples)")
++                value: Config.options.resources.historyLength
++                from: 10; to: 300; stepSize: 10
++                onValueChanged: { Config.options.resources.historyLength = value }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "music_note"
++            shape: MaterialShape.Shape.Cookie9Sided
++            title: Translation.tr("Bar media")
++
++            GroupedList {
++            ConfigSpinBox {
++                icon: "width_normal"
++                text: Translation.tr("Min width")
++                value: Config.options.bar.media.minWidth
++                from: 50; to: 400; stepSize: 10
++                onValueChanged: { Config.options.bar.media.minWidth = value }
++            }
++            ConfigSwitch {
++                buttonIcon: "lyrics"
++                text: Translation.tr("Show lyrics")
++                checked: Config.options.bar.media.showLyrics
++                onCheckedChanged: { Config.options.bar.media.showLyrics = checked }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "library_music"
++            shape: MaterialShape.Shape.Oval
++            title: Translation.tr("Sidebar media & translator")
++
++            GroupedList {
++            ConfigSwitch {
++                buttonIcon: "lyrics"
++                text: Translation.tr("Show lyrics")
++                checked: Config.options.sidebar.media.showLyrics
++                onCheckedChanged: { Config.options.sidebar.media.showLyrics = checked }
++            }
++            ConfigSwitch {
++                buttonIcon: "blur_on"
++                text: Translation.tr("Blurred background")
++                checked: Config.options.sidebar.media.blurredBackground
++                onCheckedChanged: { Config.options.sidebar.media.blurredBackground = checked }
++            }
++            ConfigSwitch {
++                buttonIcon: "shapes"
++                text: Translation.tr("Shaped album art")
++                checked: Config.options.sidebar.media.shapeArt
++                onCheckedChanged: { Config.options.sidebar.media.shapeArt = checked }
++            }
++            ConfigSpinBox {
++                icon: "timer"
++                text: Translation.tr("Translator delay (ms)")
++                value: Config.options.sidebar.translator.delay
++                from: 0; to: 2000; stepSize: 50
++                onValueChanged: { Config.options.sidebar.translator.delay = value }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "timer"
++            shape: MaterialShape.Shape.Pentagon
++            title: Translation.tr("Pomodoro")
++
++            GroupedList {
++            ConfigSpinBox {
++                icon: "timer"
++                text: Translation.tr("Focus (min)")
++                value: Math.round(Config.options.time.pomodoro.focus / 60)
++                from: 1; to: 120; stepSize: 1
++                onValueChanged: { Config.options.time.pomodoro.focus = value * 60 }
++            }
++            ConfigSpinBox {
++                icon: "coffee"
++                text: Translation.tr("Break (min)")
++                value: Math.round(Config.options.time.pomodoro.breakTime / 60)
++                from: 1; to: 60; stepSize: 1
++                onValueChanged: { Config.options.time.pomodoro.breakTime = value * 60 }
++            }
++            ConfigSpinBox {
++                icon: "self_improvement"
++                text: Translation.tr("Long break (min)")
++                value: Math.round(Config.options.time.pomodoro.longBreak / 60)
++                from: 1; to: 120; stepSize: 1
++                onValueChanged: { Config.options.time.pomodoro.longBreak = value * 60 }
++            }
++            ConfigSpinBox {
++                icon: "repeat"
++                text: Translation.tr("Cycles before long break")
++                value: Config.options.time.pomodoro.cyclesBeforeLongBreak
++                from: 1; to: 12; stepSize: 1
++                onValueChanged: { Config.options.time.pomodoro.cyclesBeforeLongBreak = value }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "layers"
++            shape: MaterialShape.Shape.Diamond
++            title: Translation.tr("Overlay widgets")
++
++            GroupedList {
++            ConfigSpinBox {
++                icon: "opacity"
++                text: Translation.tr("Click-through opacity (%)")
++                value: Math.round(Config.options.overlay.clickthroughOpacity * 100)
++                from: 10; to: 100; stepSize: 5
++                onValueChanged: { Config.options.overlay.clickthroughOpacity = value / 100 }
++            }
++            ConfigSpinBox {
++                icon: "zoom_out_map"
++                text: Translation.tr("Floating image scale (%)")
++                value: Math.round(Config.options.overlay.floatingImage.scale * 100)
++                from: 10; to: 200; stepSize: 5
++                onValueChanged: { Config.options.overlay.floatingImage.scale = value / 100 }
++            }
++            }
++        }
++
++        ContentSection {
++            icon: "widgets"
++            shape: MaterialShape.Shape.Pill
++            title: Translation.tr("Desktop widget look")
++
++            GroupedList {
++            ConfigSwitch {
++                buttonIcon: "blur_on"
++                text: Translation.tr("Blur widget backgrounds")
++                checked: Config.options.background.widgets.blurWidgets
++                onCheckedChanged: { Config.options.background.widgets.blurWidgets = checked }
++            }
++            ConfigSpinBox {
++                enabled: Config.options.background.widgets.blurWidgets
++                icon: "blur_circular"
++                text: Translation.tr("Blur radius")
++                value: Config.options.background.widgets.blurRadius
++                from: 0; to: 100; stepSize: 4
++                onValueChanged: { Config.options.background.widgets.blurRadius = value }
++            }
++            ConfigSwitch {
++                buttonIcon: "shadow"
++                text: Translation.tr("Widget shadows")
++                checked: Config.options.background.widgets.shadow
++                onCheckedChanged: { Config.options.background.widgets.shadow = checked }
++            }
++            }
++        }
++    }
++}
+diff --git a/modules/ii/sidebarLeft/SidebarLeftContent.qml b/modules/ii/sidebarLeft/SidebarLeftContent.qml
+index a506d0f..6f3c6d0 100644
+--- a/modules/ii/sidebarLeft/SidebarLeftContent.qml
++++ b/modules/ii/sidebarLeft/SidebarLeftContent.qml
+@@ -24,6 +24,12 @@ Item {
+         ...((root.animeEnabled && !root.animeCloset) ? [{"icon": "bookmark_heart", "name": Translation.tr("Anime")}] : [])
+     ]
+     property int tabCount: swipeView.count
++    // Restore the last tab that was open, clamped in case the tab list
++    // shrunk (e.g. a tab got disabled) since it was last saved.
++    property int initialTabIndex: Math.min(
++        Math.max(Persistent.states.sidebar.left.tabIndex, 0),
++        Math.max(root.tabButtonList.length - 1, 0)
++    )
+ 
+     function focusActiveItem() {
+         swipeView.currentItem.forceActiveFocus()
+@@ -47,15 +53,18 @@ Item {
+             fill: parent
+             margins: sidebarPadding
+         }
+-        spacing: verticalTabBar.expanded ? -2 : 0
++        spacing: 0
+ 
+         VerticalTabBar {
+             id: verticalTabBar
+             visible: tabButtonList.length > 0
+             Layout.fillWidth: true
+             tabButtonList: root.tabButtonList
+-            currentIndex: swipeView.currentIndex
+-            onCurrentIndexChanged: swipeView.currentIndex = currentIndex
++            currentIndex: root.initialTabIndex
++            onCurrentIndexChanged: {
++                swipeView.currentIndex = currentIndex;
++                Persistent.states.sidebar.left.tabIndex = currentIndex;
++            }
+         }
+ 
+         Rectangle {
+@@ -73,7 +82,7 @@ Item {
+                 id: swipeView
+                 anchors.fill: parent
+                 spacing: 10
+-                currentIndex: tabBar.currentIndex
++                currentIndex: root.initialTabIndex
+ 
+                 clip: true
+                 layer.enabled: true
+diff --git a/modules/ii/sidebarLeft/SidebarPlayerControl.qml b/modules/ii/sidebarLeft/SidebarPlayerControl.qml
+index c2f6f1e..65bd3fe 100644
+--- a/modules/ii/sidebarLeft/SidebarPlayerControl.qml
++++ b/modules/ii/sidebarLeft/SidebarPlayerControl.qml
+@@ -305,7 +305,28 @@ Item {
+ 
+                 RowLayout {
+                     Layout.fillWidth: true
+-                    spacing: 24
++                    spacing: 16
++
++                    RippleButton {
++                        property real baseSize: Math.max(60, parent.parent.height * 0.06)
++                        implicitWidth: baseSize
++                        implicitHeight: baseSize 
++                        buttonRadius: Appearance.rounding.verylarge
++                        colBackground: "transparent"
++                        colBackgroundHover: "transparent"
++                        colRipple: "transparent"
++                        padding: -10
++                        downAction: () => root.player?.previous()
++                        contentItem: MaterialShapeWrappedMaterialSymbol {
++                            wrappedShape: MaterialShape.Shape.Cookie12Sided
++                            padding: 0
++                            iconSize: 32
++                            fill: 1
++                            text: "skip_previous"
++                            color: ColorUtils.transparentize(blendedColors.colSecondaryContainer, 0.7)
++                            colSymbol: blendedColors.colOnSecondaryContainer
++                        }
++                    }
+ 
+                     RippleButton {
+                         property real baseSize: Math.max(70, parent.parent.height * 0.1)
+@@ -352,28 +373,7 @@ Item {
+ 
+                 RowLayout {
+                     Layout.fillWidth: true
+-                    spacing: 24
+-
+-                    RippleButton {
+-                        property real baseSize: Math.max(60, parent.parent.height * 0.06)
+-                        implicitWidth: baseSize
+-                        implicitHeight: baseSize 
+-                        buttonRadius: Appearance.rounding.verylarge
+-                        colBackground: "transparent"
+-                        colBackgroundHover: "transparent"
+-                        colRipple: "transparent"
+-                        padding: -10
+-                        downAction: () => root.player?.previous()
+-                        contentItem: MaterialShapeWrappedMaterialSymbol {
+-                            wrappedShape: MaterialShape.Shape.Cookie12Sided
+-                            padding: 0
+-                            iconSize: 32
+-                            fill: 1
+-                            text: "skip_previous"
+-                            color: ColorUtils.transparentize(blendedColors.colSecondaryContainer, 0.7)
+-                            colSymbol: blendedColors.colOnSecondaryContainer
+-                        }
+-                    }
++                    spacing: 0
+ 
+                     ColumnLayout {
+                         Layout.fillWidth: true
+diff --git a/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml b/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
+index a64c336..9d638f1 100644
+--- a/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
++++ b/modules/ii/sidebarRight/quickToggles/classicStyle/GameMode.qml
+@@ -7,25 +7,31 @@ import Quickshell.Io
+ QuickToggleButton {
+     id: root
+     buttonIcon: "gamepad"
+-    toggled: toggled
++    toggled: Persistent.states.gamemode.enabled
++
++    // Animation leaves deliberately left untouched: "layersIn", "layersOut",
++    // "fadeLayersIn", "fadeLayersOut" — these drive layer-shell surfaces like
++    // the sidebars, so leaving them alone keeps sidebar animations working
++    // while Game Mode is on.
++    readonly property var animLeavesToDisable: [
++        "windowsIn", "windowsOut", "windowsMove",
++        "border", "fadeIn", "fadeOut",
++        "workspaces", "specialWorkspaceIn", "specialWorkspaceOut"
++    ]
+ 
+     onClicked: {
+         root.toggled = !root.toggled
++        Persistent.states.gamemode.enabled = root.toggled
+         if (root.toggled) {
+-            Quickshell.execDetached(["bash", "-c", `hyprctl --batch "keyword animations:enabled 0; keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:gaps_out 0; keyword general:border_size 1; keyword decoration:rounding 0; keyword general:allow_tearing 1"`])
++            const animCmds = root.animLeavesToDisable.map(leaf => `keyword animation ${leaf},0`).join("; ")
++            Quickshell.execDetached(["bash", "-c",
++                `hyprctl --batch "keyword decoration:shadow:enabled 0; keyword decoration:blur:enabled 0; keyword general:gaps_in 0; keyword general:border_size 1; keyword general:allow_tearing 1; ${animCmds}"`
++            ])
+         } else {
+             Quickshell.execDetached(["hyprctl", "reload"])
+         }
+     }
+-    Process {
+-        id: fetchActiveState
+-        running: true
+-        command: ["bash", "-c", `test "$(hyprctl getoption animations:enabled -j | jq ".int")" -ne 0`]
+-        onExited: (exitCode, exitStatus) => {
+-            root.toggled = exitCode !== 0 // Inverted because enabled = nonzero exit
+-        }
+-    }
+     StyledToolTip {
+         text: Translation.tr("Game mode")
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/modules/ii/trayPanel/TrayPanel.qml b/modules/ii/trayPanel/TrayPanel.qml
+new file mode 100644
+index 0000000..1445039
+--- /dev/null
++++ b/modules/ii/trayPanel/TrayPanel.qml
+@@ -0,0 +1,341 @@
++pragma ComponentBehavior: Bound
++import qs
++import qs.services
++import qs.modules.common
++import qs.modules.common.widgets
++import qs.modules.common.functions
++import qs.modules.ii.bar
++import QtQuick
++import QtQuick.Layouts
++import Quickshell
++import Quickshell.Wayland
++import Quickshell.Widgets
++import Quickshell.Services.SystemTray
++
++// Standalone tray panel, opened from the hot corner dropdown
++// (GlobalStates.trayPanelOpen). Shows every StatusNotifierItem as a big
++// Material-style tile: left click = activate, right click = context menu.
++// Same Loader-active pattern as EqualizerPopup, so the window only exists
++// while the panel is open.
++Scope {
++    id: root
++
++    readonly property var cfg: Config.options.trayPanel
++    readonly property int columns: cfg.columns
++    readonly property real tileSize: cfg.tileSize
++    readonly property real tileSpacing: 8
++    readonly property real cardPadding: 20
++    readonly property real cardRadius: cfg.cornerRadius
++    readonly property bool animate: cfg.animate
++    readonly property bool showLabels: cfg.showLabels
++    readonly property string placement: cfg.placement
++    readonly property var trayItems: cfg.hideInactive
++        ? SystemTray.items.values.filter(i => i.status !== Status.Passive)
++        : [...SystemTray.items.values]
++
++    readonly property bool barVertical: Config.options.bar.vertical
++    readonly property string barEdge: {
++        if (!barVertical) return Config.options.bar.bottom ? "bottom" : "top"
++        return Config.options.bar.bottom ? "right" : "left"
++    }
++    readonly property real barThickness: barVertical ? Appearance.sizes.verticalBarWidth : Appearance.sizes.barHeight
++    readonly property real gap: Appearance.sizes.hyprlandGapsOut
++
++    // Placement: "bar" hugs the bar side, otherwise a fixed screen corner / center
++    readonly property bool anchorTop: placement === "bar" ? barEdge !== "bottom" : placement.startsWith("top")
++    readonly property bool anchorBottom: placement === "bar" ? barEdge === "bottom" : placement.startsWith("bottom")
++    readonly property bool anchorRight: placement === "bar" ? barEdge !== "left" : placement.endsWith("Right")
++    readonly property bool anchorLeft: placement === "bar" ? barEdge === "left" : placement.endsWith("Left")
++
++    Loader {
++        id: panelLoader
++        active: GlobalStates.trayPanelOpen
++
++        sourceComponent: PanelWindow {
++            id: panelWindow
++            visible: true
++
++            exclusionMode: ExclusionMode.Ignore
++            exclusiveZone: 0
++            color: "transparent"
++            WlrLayershell.namespace: "quickshell:trayPanel"
++            WlrLayershell.layer: WlrLayer.Overlay
++
++            implicitWidth: card.implicitWidth + Appearance.sizes.elevationMargin * 2
++            implicitHeight: card.implicitHeight + Appearance.sizes.elevationMargin * 2
++
++            anchors {
++                top: root.anchorTop
++                bottom: root.anchorBottom
++                right: root.anchorRight
++                left: root.anchorLeft
++            }
++            margins {
++                top: root.anchorTop ? root.gap + (root.barEdge === "top" ? root.barThickness : 0) : 0
++                bottom: root.anchorBottom ? root.gap + (root.barEdge === "bottom" ? root.barThickness : 0) : 0
++                right: root.anchorRight ? root.gap + (root.barEdge === "right" ? root.barThickness : 0) : 0
++                left: root.anchorLeft ? root.gap + (root.barEdge === "left" ? root.barThickness : 0) : 0
++            }
++
++            mask: Region { item: card }
++
++            Component.onCompleted: GlobalFocusGrab.addDismissable(panelWindow)
++            Component.onDestruction: GlobalFocusGrab.removeDismissable(panelWindow)
++            Connections {
++                target: GlobalFocusGrab
++                function onDismissed() { GlobalStates.trayPanelOpen = false }
++            }
++
++            StyledRectangularShadow { target: card }
++
++            Rectangle {
++                id: card
++                anchors.centerIn: parent
++
++                property bool shown: !root.animate
++                Component.onCompleted: shown = true
++
++                implicitWidth: content.implicitWidth + root.cardPadding * 2
++                implicitHeight: content.implicitHeight + root.cardPadding * 2
++                radius: root.cardRadius
++                color: Appearance.colors.colLayer0
++                border.width: 1
++                border.color: Appearance.colors.colLayer0Border
++
++                // Springy entrance (M3 expressive fast spatial overshoot)
++                transformOrigin: {
++                    if (root.anchorTop && root.anchorRight) return Item.TopRight
++                    if (root.anchorTop && root.anchorLeft) return Item.TopLeft
++                    if (root.anchorBottom && root.anchorRight) return Item.BottomRight
++                    if (root.anchorBottom && root.anchorLeft) return Item.BottomLeft
++                    return Item.Center
++                }
++                opacity: shown ? 1 : 0
++                scale: shown ? 1 : 0.8
++                Behavior on opacity {
++                    enabled: root.animate
++                    NumberAnimation {
++                        duration: Appearance.animationCurves.expressiveEffectsDuration
++                        easing.type: Easing.BezierSpline
++                        easing.bezierCurve: Appearance.animationCurves.expressiveEffects
++                    }
++                }
++                Behavior on scale {
++                    enabled: root.animate
++                    NumberAnimation {
++                        duration: 450
++                        easing.type: Easing.BezierSpline
++                        easing.bezierCurve: Appearance.animationCurves.expressiveFastSpatial
++                    }
++                }
++                Behavior on implicitHeight {
++                    enabled: root.animate
++                    NumberAnimation {
++                        duration: 350
++                        easing.type: Easing.BezierSpline
++                        easing.bezierCurve: Appearance.animationCurves.expressiveFastSpatial
++                    }
++                }
++
++                ColumnLayout {
++                    id: content
++                    anchors.centerIn: parent
++                    spacing: 14
++
++                    // Header
++                    RowLayout {
++                        Layout.fillWidth: true
++                        spacing: 10
++
++                        Rectangle {
++                            implicitWidth: 40
++                            implicitHeight: 40
++                            radius: Appearance.rounding.full
++                            color: Appearance.colors.colSecondaryContainer
++                            MaterialSymbol {
++                                anchors.centerIn: parent
++                                text: "widgets"
++                                iconSize: 22
++                                color: Appearance.colors.colOnSecondaryContainer
++                            }
++                        }
++                        StyledText {
++                            Layout.fillWidth: true
++                            text: Translation.tr("System tray")
++                            font.pixelSize: Appearance.font.pixelSize.larger
++                            color: Appearance.colors.colOnLayer0
++                        }
++                        Rectangle {
++                            implicitWidth: countText.implicitWidth + 20
++                            implicitHeight: 28
++                            radius: Appearance.rounding.full
++                            color: Appearance.colors.colLayer1
++                            StyledText {
++                                id: countText
++                                anchors.centerIn: parent
++                                text: root.trayItems.length
++                                font.pixelSize: Appearance.font.pixelSize.smaller
++                                color: Appearance.colors.colOnLayer1
++                            }
++                        }
++                    }
++
++                    // Tiles
++                    GridLayout {
++                        id: grid
++                        Layout.alignment: Qt.AlignHCenter
++                        visible: root.trayItems.length > 0
++                        columns: root.columns
++                        columnSpacing: root.tileSpacing
++                        rowSpacing: root.tileSpacing
++
++                        Repeater {
++                            model: ScriptModel { values: root.trayItems }
++                            delegate: TrayTile {}
++                        }
++                    }
++
++                    // Empty state
++                    ColumnLayout {
++                        Layout.alignment: Qt.AlignHCenter
++                        Layout.preferredWidth: root.columns * root.tileSize + (root.columns - 1) * root.tileSpacing
++                        Layout.topMargin: 12
++                        Layout.bottomMargin: 12
++                        visible: root.trayItems.length === 0
++                        spacing: 8
++                        MaterialSymbol {
++                            Layout.alignment: Qt.AlignHCenter
++                            text: "inbox"
++                            iconSize: 40
++                            color: Appearance.colors.colSubtext
++                        }
++                        StyledText {
++                            Layout.alignment: Qt.AlignHCenter
++                            text: Translation.tr("No apps in the tray")
++                            color: Appearance.colors.colSubtext
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    component TrayTile: MouseArea {
++        id: tile
++        required property var modelData
++        required property int index
++        readonly property var trayItem: modelData
++
++        property bool shown: !root.animate
++        property var menuWindow: null
++
++        Layout.preferredWidth: root.tileSize
++        Layout.preferredHeight: root.tileSize
++        hoverEnabled: true
++        acceptedButtons: Qt.LeftButton | Qt.RightButton
++        cursorShape: Qt.PointingHandCursor
++
++        // Staggered pop-in
++        Timer {
++            running: root.animate
++            interval: 40 + tile.index * 35
++            onTriggered: tile.shown = true
++        }
++        opacity: shown ? 1 : 0
++        scale: shown ? (tile.pressed ? 0.93 : 1) : 0.7
++        Behavior on opacity {
++            enabled: root.animate
++            animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
++        }
++        Behavior on scale {
++            enabled: root.animate
++            NumberAnimation {
++                duration: 350
++                easing.type: Easing.BezierSpline
++                easing.bezierCurve: Appearance.animationCurves.expressiveFastSpatial
++            }
++        }
++
++        function openMenu() {
++            if (!trayItem.hasMenu) return;
++            if (menuLoader.active && menuLoader.item && typeof menuLoader.item.close === "function")
++                menuLoader.item.close();
++            else
++                menuLoader.active = true;
++        }
++
++        onClicked: event => {
++            if (event.button === Qt.RightButton) {
++                tile.openMenu();
++            } else if (trayItem.onlyMenu) {
++                tile.openMenu();
++            } else {
++                trayItem.activate();
++            }
++        }
++
++        Loader {
++            id: menuLoader
++            active: false
++            sourceComponent: SysTrayMenu {
++                Component.onCompleted: this.open()
++                trayItemMenuHandle: tile.trayItem.menu
++                trayItemId: tile.trayItem.id
++                anchor {
++                    window: tile.QsWindow.window
++                    item: tile
++                    gravity: Edges.Bottom
++                    edges: Edges.Bottom
++                }
++                onMenuOpened: window => {
++                    tile.menuWindow = window;
++                    GlobalFocusGrab.addPersistent(window);
++                }
++                onMenuClosed: {
++                    if (tile.menuWindow) GlobalFocusGrab.removePersistent(tile.menuWindow);
++                    tile.menuWindow = null;
++                    menuLoader.active = false;
++                }
++            }
++        }
++
++        // Shape-morphing background: squircle -> rounder on hover
++        Rectangle {
++            id: bg
++            anchors.fill: parent
++            radius: Math.min(tile.width / 2, tile.containsMouse && root.animate ? root.cardRadius + 6 : root.cardRadius - 5)
++            color: tile.containsMouse ? Appearance.colors.colSecondaryContainer : Appearance.colors.colLayer1
++            Behavior on radius {
++                enabled: root.animate
++                NumberAnimation {
++                    duration: 300
++                    easing.type: Easing.BezierSpline
++                    easing.bezierCurve: Appearance.animationCurves.expressiveFastSpatial
++                }
++            }
++            Behavior on color { animation: Appearance.animation.elementMoveFast.colorAnimation.createObject(this) }
++        }
++
++        ColumnLayout {
++            anchors.centerIn: parent
++            width: parent.width - 12
++            spacing: 6
++
++            IconImage {
++                Layout.alignment: Qt.AlignHCenter
++                implicitSize: Math.round(root.tileSize * 0.42)
++                source: tile.trayItem.icon
++            }
++            StyledText {
++                Layout.fillWidth: true
++                visible: root.showLabels
++                horizontalAlignment: Text.AlignHCenter
++                elide: Text.ElideRight
++                text: tile.trayItem.tooltipTitle.length > 0 ? tile.trayItem.tooltipTitle
++                    : (tile.trayItem.title.length > 0 ? tile.trayItem.title : tile.trayItem.id)
++                font.pixelSize: Appearance.font.pixelSize.smaller
++                color: tile.containsMouse ? Appearance.colors.colOnSecondaryContainer : Appearance.colors.colOnLayer1
++            }
++        }
++    }
++}
+diff --git a/panelFamilies/IllogicalImpulseFamily.qml b/panelFamilies/IllogicalImpulseFamily.qml
+index 540bd40..4a7e780 100644
+--- a/panelFamilies/IllogicalImpulseFamily.qml
++++ b/panelFamilies/IllogicalImpulseFamily.qml
+@@ -5,6 +5,7 @@ import qs
+ import qs.modules.common
+ import qs.modules.ii.background
+ import qs.modules.ii.bar
++import qs.modules.ii.cheatsheet
+ import qs.modules.ii.dock
+ import qs.modules.ii.equalizer
+ import qs.modules.ii.lock
+@@ -21,6 +22,7 @@ import qs.modules.ii.screenTranslator
+ import qs.modules.ii.sessionScreen
+ import qs.modules.ii.sidebarLeft
+ import qs.modules.ii.sidebarRight
++import qs.modules.ii.trayPanel
+ import qs.modules.ii.overlay
+ import qs.modules.ii.verticalBar
+ import qs.modules.ii.wallpaperSelector
+@@ -31,6 +33,7 @@ import qs.modules.ii.frame
+ Scope {
+     PanelLoader { extraCondition: !Config.options.bar.vertical; component: Bar {} }
+     PanelLoader { component: Background {} }
++    PanelLoader { component: Cheatsheet {} }
+     PanelLoader { extraCondition: Config.options.dock.enable; component: Dock {} }
+     PanelLoader { component: EqualizerPopup {} }
+     PanelLoader { component: Lock {} }
+@@ -47,6 +50,7 @@ Scope {
+     PanelLoader { component: SessionScreen {} }
+     PanelLoader { component: SidebarLeft {} }
+     PanelLoader { component: SidebarRight {} }
++    PanelLoader { component: TrayPanel {} }
+     PanelLoader { extraCondition: Config.options.bar.vertical; component: VerticalBar {} }
+     PanelLoader { component: WallpaperSelector {} }
+     PanelLoader { component: Settings {} }
+diff --git a/scripts/hyprland/hyprconfigurator.py b/scripts/hyprland/hyprconfigurator.py
+index 155982c..4838408 100755
+--- a/scripts/hyprland/hyprconfigurator.py
++++ b/scripts/hyprland/hyprconfigurator.py
+@@ -14,6 +14,7 @@ BOOL_KEYS = {
+     "input:numlock_by_default",
+     "input:force_no_accel",
+     "input:left_handed",
++    "input:natural_scroll",
+     "input:touchpad:natural_scroll",
+     "input:touchpad:disable_while_typing",
+     "input:touchpad:clickfinger_behavior",
+@@ -181,6 +182,53 @@ def edit_lua(file_path, set_pairs, reset_keys):
+     write_atomic(file_path, "".join(new_lines))
+ 
+ 
++def to_lua_animation_line(leaf, enabled):
++    val = "false" if str(enabled) in ("0", "false", "False") else "true"
++    return f'hl.animation({{ leaf = "{leaf}", enabled = {val} }})\n'
++
++
++def make_animation_marker(leaf):
++    return f'leaf = "{leaf}"'
++
++
++def edit_lua_animations(file_path, set_pairs, reset_leaves):
++    try:
++        with open(file_path) as f:
++            lines = f.readlines()
++    except FileNotFoundError:
++        lines = []
++
++    set_dict    = dict(set_pairs)
++    reset_set   = set(reset_leaves)
++    all_leaves  = list(set_dict) + list(reset_set)
++    markers     = {leaf: make_animation_marker(leaf) for leaf in all_leaves}
++
++    new_lines  = []
++    found_leaves = set()
++
++    for line in lines:
++        matched = None
++        for leaf in all_leaves:
++            if markers[leaf] in line:
++                matched = leaf
++                break
++        if matched is None:
++            new_lines.append(line)
++        elif matched in reset_set:
++            print(f"Removed animation override: {matched}")
++        else:
++            new_lines.append(to_lua_animation_line(matched, set_dict[matched]))
++            found_leaves.add(matched)
++            print(f"Updated animation: {to_lua_animation_line(matched, set_dict[matched]).strip()}")
++
++    for leaf, enabled in set_dict.items():
++        if leaf not in found_leaves:
++            new_lines.append(to_lua_animation_line(leaf, enabled))
++            print(f"Added animation:   {to_lua_animation_line(leaf, enabled).strip()}")
++
++    write_atomic(file_path, "".join(new_lines))
++
++
+ def save_preset(anim_file, preset_name):
+     content = ANIM_PRESETS.get(preset_name)
+     if not content:
+@@ -195,6 +243,8 @@ if __name__ == "__main__":
+     p.add_argument("--file", default="~/.config/hypr/hyprland/shellOverrides/main.lua")
+     p.add_argument("--set", nargs=2, action="append", metavar=("KEY", "VALUE"))
+     p.add_argument("--reset", action="append", metavar="KEY")
++    p.add_argument("--set-anim", nargs=2, action="append", metavar=("LEAF", "ENABLED"))
++    p.add_argument("--reset-anim", action="append", metavar="LEAF")
+     p.add_argument("--anim-preset", metavar="PRESET")
+     p.add_argument("--anim-file", default="~/.config/hypr/hyprland/shellOverrides/animations.lua")
+     args = p.parse_args()
+@@ -213,5 +263,18 @@ if __name__ == "__main__":
+ 
+     if set_pairs or reset_keys:
+         edit_lua(os.path.expanduser(args.file), set_pairs, reset_keys)
+-    elif not args.anim_preset:
+-        print("Error: specify --set, --reset, or --anim-preset")
+\ No newline at end of file
++
++    raw_anim_sets   = args.set_anim or []
++    reset_anim_leaves = args.reset_anim or []
++    anim_set_pairs  = []
++    for leaf, v in raw_anim_sets:
++        if v == "[[EMPTY]]":
++            reset_anim_leaves.append(leaf)
++        else:
++            anim_set_pairs.append((leaf, v))
++
++    if anim_set_pairs or reset_anim_leaves:
++        edit_lua_animations(os.path.expanduser(args.file), anim_set_pairs, reset_anim_leaves)
++
++    if not (set_pairs or reset_keys or anim_set_pairs or reset_anim_leaves or args.anim_preset):
++        print("Error: specify --set, --reset, --set-anim, --reset-anim, or --anim-preset")
+\ No newline at end of file
+diff --git a/services/HyprlandConfig.qml b/services/HyprlandConfig.qml
+index 13013b4..5e02eb9 100644
+--- a/services/HyprlandConfig.qml
++++ b/services/HyprlandConfig.qml
+@@ -60,6 +60,26 @@ Singleton {
+         Quickshell.execDetached(args)
+     }
+ 
++    // Enable/disable individual animation leaves (e.g. "windowsIn", "border",
++    // "layersIn") instead of the global animations:enabled master switch, so
++    // some categories (like layer-shell surfaces such as sidebars) can be
++    // left animated while others are turned off.
++    function setAnimLeaves(entries: var) {
++        let args = ["python3", root.configuratorScriptPath, "--file", root.shellOverridesPath]
++        for (let leaf in entries) {
++            args.push("--set-anim", leaf, String(entries[leaf]))
++        }
++        Quickshell.execDetached(args)
++    }
++
++    function resetAnimLeaves(leaves: list<string>) {
++        let args = ["python3", root.configuratorScriptPath, "--file", root.shellOverridesPath]
++        for (let i = 0; i < leaves.length; i++) {
++            args.push("--reset-anim", leaves[i])
++        }
++        Quickshell.execDetached(args)
++    }
++
+     readonly property string borderActiveKey: "general:col:active_border"
+     readonly property string borderInactiveKey: "general:col:inactive_border"
+ 
+diff --git a/services/HyprlandOptions.qml b/services/HyprlandOptions.qml
+index dbea9b5..fae566b 100644
+--- a/services/HyprlandOptions.qml
++++ b/services/HyprlandOptions.qml
+@@ -12,6 +12,7 @@ Singleton {
+         "decoration:shadow:enabled", "decoration:shadow:range", "decoration:dim_inactive", "decoration:dim_strength",
+         "decoration:blur:noise", "decoration:blur:vibrancy",
+         "input:sensitivity", "input:accel_profile", "input:force_no_accel", "input:left_handed",
++        "input:natural_scroll", "input:scroll_factor",
+         "input:kb_variant", "input:kb_options",
+         "input:touchpad:tap-to-click", "input:touchpad:tap-and-drag", "input:touchpad:middle_button_emulation",
+         "misc:vrr", "misc:disable_hyprland_logo", "misc:disable_splash_rendering",
+diff --git a/services/SettingsPages.qml b/services/SettingsPages.qml
+index 7cf5e56..2dd296b 100644
+--- a/services/SettingsPages.qml
++++ b/services/SettingsPages.qml
+@@ -16,6 +16,7 @@ Singleton {
+             { id: "bar",       name: Translation.tr("Bar"),       icon: "toast",          iconRotation: 180, file: "BarConfig.qml" },
+             { id: "desktop",   name: Translation.tr("Desktop"),   icon: "texture",        file: "BackgroundConfig.qml" },
+             { id: "interface", name: Translation.tr("Interface"), icon: "bottom_app_bar", file: "InterfaceConfig.qml" },
++            { id: "widgets",   name: Translation.tr("Widgets"),   icon: "widgets",        file: "WidgetsConfig.qml" },
+             { id: "services",  name: Translation.tr("Services"),  icon: "settings",       file: "ServicesConfig.qml" },
+         ];
+         if (WM.compositor === "hyprland")
+diff --git a/translations/en_US.json b/translations/en_US.json
+index 8fb4e14..a6b99d6 100644
+--- a/translations/en_US.json
++++ b/translations/en_US.json
+@@ -296,6 +296,8 @@
+   "Welcome app": "Welcome app",
+   "Humidity": "Humidity",
+   "Page %1": "Page %1",
++  "Previous tab": "Previous tab",
++  "Next tab": "Next tab",
+   "Feels like %1": "Feels like %1",
+   "Transparency": "Transparency",
+   "%1   •   %2 tasks": "%1   •   %2 tasks",
+@@ -568,6 +570,9 @@
+   "Show bar on": "Show bar on",
+   "Show date": "Show date",
+   "Show only when locked": "Show only when locked",
++  "Super Preview": "Super Preview",
++  "Mouse natural scroll": "Mouse natural scroll",
++  "Mouse scroll factor": "Mouse scroll factor",
+   "Swap": "Swap",
+   "Symbol": "Symbol",
+   "System Icons": "System Icons",
