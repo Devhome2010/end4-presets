@@ -1,0 +1,23 @@
+--- a/.config/hypr/hyprland/keybinds.lua
++++ b/.config/hypr/hyprland/keybinds.lua
+@@ -9,10 +9,16 @@
+ local qsIpcCall = "qs -c $qsConfig ipc call"
+ local qsIsAlive = qsIpcCall .. " TEST_ALIVE"
+ 
+-hl.bind("SUPER + SUPER_L", hl.dsp.global("quickshell:searchToggleRelease"), { description = "Shell: Toggle search" })
+-hl.bind("SUPER + SUPER_R", hl.dsp.global("quickshell:searchToggleRelease"))
+-hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
+-hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"))
++hl.bind("SUPER + SUPER_L", hl.dsp.global("quickshell:searchToggleRelease"),
++    { release = true, description = "Shell: Toggle search" })
++hl.bind("SUPER + SUPER_R", hl.dsp.global("quickshell:searchToggleRelease"), { release = true })
++hl.bind("SUPER + SUPER_L", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"), { release = true })
++hl.bind("SUPER + SUPER_R", hl.dsp.exec_cmd(qsIsAlive .. " || pkill fuzzel || fuzzel"), { release = true })
++
++-- Prevent Super release from opening search after mouse input.
++for _, key in ipairs({ "mouse_down", "mouse_up" }) do
++    hl.bind("SUPER + " .. key, hl.dsp.global("quickshell:searchToggleReleaseInterrupt"), { non_consuming = true })
++end
+ 
+ hl.bind("SUPER_L", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
+ hl.bind("SUPER_R", hl.dsp.global("quickshell:workspaceNumber"), { ignore_mods = true, transparent = true })
